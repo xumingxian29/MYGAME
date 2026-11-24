@@ -20,6 +20,9 @@ var _empty_label: Label
 var _desc_label: Label
 var _class_buttons: Array[Button] = []
 var _hero: int = HeroClass.WARRIOR
+## 触屏模式下换操作说明，并且不自动抢焦点（一进菜单就弹软键盘会挡住半屏）
+var _touch_mode: bool = false
+var _hint: Label
 ## 防止一次点击里 emit 两次（连点 / 回车混用）导致重复开局
 var _locked: bool = false
 
@@ -75,14 +78,18 @@ func _build() -> void:
 
 	_box.add_child(UiKit.divider())
 
-	var hint := UiKit.label(
-		"WASD / 方向键移动 · 自动攻击 · 空格放技能 · 升级点击卡片\n死亡后 R 再来一局 · P 换人",
-		13, Color(0.6, 0.67, 0.8),
-	)
+	var hint := UiKit.label(_hint_text(), 13, Color(0.6, 0.67, 0.8))
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_box.add_child(hint)
+	_hint = hint
 
 	_select_hero(HeroClass.WARRIOR)
+
+
+func _hint_text() -> String:
+	if _touch_mode:
+		return "左侧拖动移动 · 自动攻击 · 右下角放技能 · 升级点卡片\n结算页可直接再来一局或换人"
+	return "WASD / 方向键移动 · 自动攻击 · 空格放技能 · 升级点击卡片\n死亡后 R 再来一局 · P 换人"
 
 
 ## 三张职业卡 + 下方一句说明。说明跟着选择切换，而不是三张卡各写一段——
@@ -212,15 +219,21 @@ func _make_start_button() -> Button:
 
 # ---------------------------------------------------------------- 对外接口
 
-func open(default_name: String, players: Array[Dictionary], hero: int = HeroClass.WARRIOR) -> void:
+func open(default_name: String, players: Array[Dictionary], hero: int = HeroClass.WARRIOR,
+		touch: bool = false) -> void:
 	_locked = false
+	_touch_mode = touch
 	_root.visible = true
+	if _hint != null:
+		_hint.text = _hint_text()
 	_refresh(players)
 	_select_hero(hero)
 	_input.text = default_name
-	# 预选整段，直接打字即覆盖旧昵称
-	_input.grab_focus()
-	_input.select_all()
+	# 触屏上不抢焦点：点输入框时系统才弹软键盘，否则一进菜单半个屏幕都是键盘
+	if not _touch_mode:
+		# 预选整段，直接打字即覆盖旧昵称
+		_input.grab_focus()
+		_input.select_all()
 
 
 func close() -> void:

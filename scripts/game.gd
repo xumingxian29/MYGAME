@@ -22,6 +22,12 @@ const MAX_SEPARATION_NEIGHBORS: int = 8
 ## 每帧直接消掉最深那处重叠的比例。纯靠力的话，人群中心会长期保持 60% 左右的深度穿插。
 const SEPARATION_RELAX: float = 0.6
 
+## 触屏设备的逻辑分辨率。1280×720 缩到手机横屏（约 844×390 CSS 像素）时，
+## 字号只剩 8 个 CSS 像素，血量数字基本看不清；降到 960×540 后同样的字放大到
+## 11~12 像素，代价是可见范围小一圈——对手机来说这笔交易是划算的。
+## 桌面版仍用 1280×720，一行都不改。
+const MOBILE_VIEWPORT: Vector2i = Vector2i(960, 540)
+
 ## 刷怪间隔：0 = 最轻，1 = 最密
 const SPAWN_INTERVAL_EASY: float = 0.7
 const SPAWN_INTERVAL_HARD: float = 0.28
@@ -78,6 +84,11 @@ const CARDS: Array[Dictionary] = [
 var player: Player
 var hud: GameHud
 var start_menu: StartMenu
+## 触屏操作层（虚拟摇杆 + 技能键）。桌面设备上它自己保持隐藏，
+## 这里不需要到处判空，直接当"永远存在但可能不显示"的组件用。
+var touch: TouchControls
+## 本次是否以触屏模式运行：决定菜单文案、HUD 文案与结算按钮
+var _touch_mode: bool = false
 ## 世界容器：显式 PAUSABLE。Game 自身是 ALWAYS，若子节点用默认 INHERIT 会跟着 ALWAYS，
 ## 导致 get_tree().paused 形同虚设（升级选卡时后台照样掉血）。
 var world: Node2D
@@ -115,20 +126,43 @@ var _last_hero: int = HeroClass.WARRIOR
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	get_tree().paused = false
+	_touch_mode = TouchControls.is_touch_device()
+	# 必须在建 UI 之前切：HUD 与菜单都用锚点铺满视口，换基准分辨率后会跟着重排
+	if _touch_mode:
+		_apply_mobile_viewport()
 	RenderingServer.set_default_clear_color(Color(0.055, 0.062, 0.082))
 	world = Node2D.new()
 	world.name = "World"
 	world.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(world)
 	_build_hud()
+	_build_touch()
 	_build_menu()
 	_open_menu()
+
+
+## 只在触屏设备上调用。content_scale_size 就是"逻辑分辨率"，
+## 与 project.godot 里的 viewport_width/height 是同一个东西，可以运行时改。
+func _apply_mobile_viewport() -> void:
+	var window: Window = get_window()
+	if window != null:
+		window.content_scale_size = MOBILE_VIEWPORT
 
 
 func _build_hud() -> void:
 	hud = GameHud.new()
 	add_child(hud)
 	hud.card_chosen.connect(_choose)
+	hud.set_touch_mode(_touch_mode)
+	# 手机上按不到 R / P，结算面板给两个按钮；键盘路径同时保留
+	hud.restart_requested.connect(_restart)
+	hud.menu_requested.connect(_open_menu)
+
+
+func _build_touch() -> void:
+	touch = TouchControls.new()
+	add_child(touch)
+	touch.skill_pressed.connect(_on_skill_button)
 
 
 func _build_menu() -> void:
@@ -141,10 +175,12 @@ func _build_menu() -> void:
 func _open_menu() -> void:
 	_state = State.MENU
 	get_tree().paused = true
+	if touch != null:
+		touch.set_active(false)
 	hud.clear_overlays()
 	hud.set_danger(0.0)
 	hud.set_hud_visible(false)
-	start_menu.open(ScoreBoard.last_player(), ScoreBoard.list_players(), _last_hero)
+	start_menu.open(ScoreBoard.last_player(), ScoreBoard.list_players(), _last_hero, _touch_mode)
 
 
 func _on_menu_started(player_name: String, hero: int) -> void:
@@ -182,6 +218,8 @@ func _begin_run() -> void:
 	_spawn_player()
 	_state = State.PLAYING
 	get_tree().paused = false
+	if touch != null:
+		touch.set_active(true)
 	_update_hud()
 
 
@@ -201,6 +239,10 @@ func _spawn_player() -> void:
 	player.health_changed.connect(hud.set_health)
 	player.mana_changed.connect(hud.set_mana)
 	player.died.connect(_on_player_died)
+	if touch != null:
+		touch.set_hero(_hero)
+		player.mana_changed.connect(touch.on_mana_changed)
+		touch.on_mana_changed(player.mana, player.max_mana)
 	hud.set_hero(_hero)
 	hud.set_health(player.health, player.max_health)
 	hud.set_mana(player.mana, player.max_mana)
@@ -420,6 +462,9 @@ func _gain_xp(amount: int) -> void:
 func _open_level_up() -> void:
 	_state = State.LEVEL_UP
 	get_tree().paused = true
+	# 摇杆的感应区盖着半块屏幕，不收起来会把三张卡的点击全吃掉
+	if touch != null:
+		touch.set_active(false)
 	_update_hud()
 	_choices = _pick_choices()
 	hud.open_level_up(_level, _choices, _next_card_level)
@@ -551,6 +596,8 @@ func _choose(index: int) -> void:
 	hud.close_level_up()
 	_state = State.PLAYING
 	get_tree().paused = false
+	if touch != null:
+		touch.set_active(true)
 	_update_hud()
 	if _pending_cards > 0:
 		_open_level_up()
@@ -614,10 +661,21 @@ func _apply_upgrade(card: Dictionary) -> void:
 
 # ---------------------------------------------------------------- 结束与输入
 
+## 触摸技能键。真正的判定（蓝够不够、是否已死）都在 Player.try_use_skill() 里，
+## 这里只补一记轻震：手机上没有键盘反馈，点下去必须"有手感"。
+func _on_skill_button() -> void:
+	if _state != State.PLAYING or not is_instance_valid(player):
+		return
+	if player.try_use_skill():
+		player.add_trauma(0.2)
+
+
 func _on_player_died() -> void:
 	_state = State.GAME_OVER
 	get_tree().paused = true
 	player.visible = false
+	if touch != null:
+		touch.set_active(false)
 	hud.close_level_up()
 	# 结算界面背后不该一直闪红光：死亡后红边退掉，交给压暗遮罩做视觉切换
 	hud.set_danger(0.0)

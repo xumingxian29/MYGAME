@@ -6,6 +6,9 @@ extends CanvasLayer
 ## process_mode = ALWAYS，因此 get_tree().paused 时卡片仍可点击、文字仍可显示。
 
 signal card_chosen(index: int)
+## 结算面板上的按钮（只在触屏设备出现：手机上既没有 R 也没有 P）
+signal restart_requested
+signal menu_requested
 
 const VIGNETTE_SHADER: Shader = preload("res://scripts/ui/damage_vignette.gdshader")
 
@@ -32,6 +35,8 @@ var _hero: int = HeroClass.WARRIOR
 var _mp_current: float = 0.0
 var _mp_max: float = HeroClass.MANA_MAX
 var _mp_ready: bool = false
+## 触屏模式下文案换成"点按"，结算面板补两个可点按钮——手机上没有空格键，也没有 R / P
+var _touch_mode: bool = false
 var _stats_label: Label
 var _next_label: Label
 var _name_label: Label
@@ -181,11 +186,21 @@ func set_hero(hero: int) -> void:
 	_refresh_mana_text()
 
 
+## 打开触屏模式：只影响文案与结算面板的操作方式，数值与布局不变
+func set_touch_mode(enabled: bool) -> void:
+	_touch_mode = enabled
+	_refresh_mana_text()
+
+
+func is_touch_mode() -> bool:
+	return _touch_mode
+
+
 func _refresh_mana_text() -> void:
 	if _mp_text == null:
 		return
 	if _mp_ready:
-		_set_text(_mp_text, "空格 · %s" % HeroClass.skill_name(_hero))
+		_set_text(_mp_text, "%s · %s" % ["点按" if _touch_mode else "空格", HeroClass.skill_name(_hero)])
 		# 满蓝时条是金色，文字必须反过来用深色，否则金底金字看不出写了什么
 		_mp_text.add_theme_color_override("font_color", Color(0.13, 0.1, 0.04))
 	else:
@@ -258,8 +273,9 @@ func open_level_up(level: int, choices: Array[Dictionary], next_level: int) -> v
 	_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.5, 0.72, 1.0, 0.85)))
 
 	_panel_box.add_child(_make_label("升级！  Lv.%d" % level, 28, Color(1.0, 0.94, 0.68)))
+	var how_to: String = "点按卡片选择" if _touch_mode else "点击卡片，或按 1 / 2 / 3 选择"
 	_panel_box.add_child(_make_label(
-		"点击卡片，或按 1 / 2 / 3 选择        下一张在 Lv.%d" % next_level,
+		"%s        下一张在 Lv.%d" % [how_to, next_level],
 		14, Color(0.72, 0.8, 0.92),
 	))
 
@@ -347,12 +363,43 @@ func show_game_over(result: Dictionary) -> void:
 	record.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(record)
 
-	var hint := _make_label("R 再来一局        P 换人", 15, Color(0.8, 0.86, 0.94))
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_panel_box.add_child(hint)
+	if _touch_mode:
+		_panel_box.add_child(_make_action_row())
+	else:
+		var hint := _make_label("R 再来一局        P 换人", 15, Color(0.8, 0.86, 0.94))
+		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_panel_box.add_child(hint)
 
 	_dim.visible = true
 	_panel.visible = true
+
+
+## 触屏结算的两个大按钮。尺寸按 960 基准的设计宽度给（约 120×38 CSS 像素），
+## 再小就点不准了；键盘的 R / P 依然有效，两条路径互不干扰。
+func _make_action_row() -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 14)
+	row.add_child(_make_action_button("再来一局", Color(1.0, 0.85, 0.48), restart_requested.emit))
+	row.add_child(_make_action_button("换人", Color(0.52, 0.68, 0.92), menu_requested.emit))
+	return row
+
+
+func _make_action_button(text: String, accent: Color, callback: Callable) -> Button:
+	var button := Button.new()
+	button.text = text
+	button.custom_minimum_size = Vector2(176, 54)
+	button.focus_mode = Control.FOCUS_NONE
+	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	button.add_theme_font_override("font", UiKit.font())
+	button.add_theme_font_size_override("font_size", 20)
+	for key in ["font_color", "font_hover_color", "font_pressed_color", "font_focus_color"]:
+		button.add_theme_color_override(key, Color(0.07, 0.09, 0.13))
+	button.add_theme_stylebox_override("normal", UiKit.flat(accent, accent.lightened(0.35), 10, 0))
+	button.add_theme_stylebox_override("hover", UiKit.flat(accent.lightened(0.12), accent.lightened(0.5), 10, 0))
+	button.add_theme_stylebox_override("pressed", UiKit.flat(accent.darkened(0.12), accent.lightened(0.3), 10, 0))
+	button.pressed.connect(callback)
+	return button
 
 
 func clear_overlays() -> void:
@@ -488,6 +535,9 @@ func _make_icon(glyph: String, accent: Color, rarity: int) -> Control:
 
 	var plate := PanelContainer.new()
 	plate.custom_minimum_size = Vector2(64.0, 64.0)
+	# PanelContainer 默认 STOP，会把点在图标上的这次点击整口吃掉，卡片看上去"点不动"。
+	# 卡片的可点区域必须是整张卡，包括这个图标。
+	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var style := StyleBoxFlat.new()
 	style.bg_color = Color(accent.r, accent.g, accent.b, 0.16 + 0.05 * float(rarity))
 	style.set_corner_radius_all(12)
