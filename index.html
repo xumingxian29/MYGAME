@@ -173,12 +173,21 @@
 			animation: tilt 1.8s ease-in-out infinite;
 		}
 
+		#rotate .tip {
+			font-size: 13px;
+			color: var(--muted);
+			letter-spacing: 0.08em;
+			font-variant-numeric: tabular-nums;
+		}
+
 		@keyframes tilt {
 			0%, 40% { transform: rotate(0deg); }
 			70%, 100% { transform: rotate(90deg); }
 		}
 
-		@media (orientation: portrait) and (max-width: 820px) {
+		/* 竖屏时不能只留一块黑屏：把加载进度一起显示出来，
+		   否则玩家会以为"页面卡住没在加载"，只有横屏后才"突然出现"（试玩反馈） */
+		@media (orientation: portrait) and (pointer: coarse), (orientation: portrait) and (max-width: 820px) {
 			#rotate {
 				display: flex;
 			}
@@ -201,6 +210,7 @@
 	<div id="rotate">
 		<div class="icon"></div>
 		<div>请横屏游玩</div>
+		<div class="tip" id="rotate-percent">正在加载…</div>
 	</div>
 
 	<div id="status">
@@ -214,7 +224,7 @@
 
 	<script src="index.js"></script>
 	<script>
-		const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":true,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":1470192,"index.wasm":39514754},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
+		const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":true,"executable":"index","experimentalVK":true,"fileSizes":{"index.pck":1513540,"index.wasm":39514754},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
 		const GODOT_THREADS_ENABLED = false;
 		const engine = new Engine(GODOT_CONFIG);
 
@@ -223,6 +233,7 @@
 			const statusProgress = document.getElementById('status-progress');
 			const statusPercent = document.getElementById('status-percent');
 			const statusNotice = document.getElementById('status-notice');
+			const rotatePercent = document.getElementById('rotate-percent');
 
 			let initializing = true;
 
@@ -259,6 +270,10 @@
 				}
 				initializing = false;
 				statusOverlay.remove();
+				// 竖屏覆盖层还在：明确告诉玩家已经加载完了，转过来就能玩
+				if (rotatePercent) {
+					rotatePercent.textContent = '加载完成 · 横屏即可开始';
+				}
 			}
 
 			if (!checkWebGL2()) {
@@ -280,12 +295,20 @@
 					if (current > 0 && total > 0) {
 						statusProgress.value = current;
 						statusProgress.max = total;
-						statusPercent.textContent = Math.floor(current / total * 100) + '%';
+						const pct = Math.floor(current / total * 100);
+						statusPercent.textContent = pct + '%';
+						// 竖屏时进度条在屏外，进度只能靠这一行字传达
+						if (rotatePercent) {
+							rotatePercent.textContent = '正在加载 ' + pct + '%';
+						}
 					} else {
 						// 引擎初始化阶段没有总量，进度条改为不确定态
 						statusProgress.removeAttribute('value');
 						statusProgress.removeAttribute('max');
 						statusPercent.textContent = '正在启动引擎…';
+						if (rotatePercent) {
+							rotatePercent.textContent = '正在启动引擎…';
+						}
 					}
 				},
 			}).then(finishLoading, displayFailureNotice);
