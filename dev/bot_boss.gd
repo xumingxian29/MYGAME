@@ -16,8 +16,8 @@ extends SceneTree
 ##   kite_ranged 射手绕圈走位、技能好了就放（远程职业：验证"Boss 优先索敌"那条路径）
 ## 必须覆盖远程职业：战士没有远程武器，只用战士测的话子弹相关改动完全测不到。
 
-## 780 秒 = 13 分钟。毒圈上线后一局最迟 11:30 必结算，留 90 秒余量是为了量出
-## "毒圈没起作用"的最坏情况——给到时限都不死，说明圈根本没逼死人。
+## 480 秒 = 8 分钟，正好等于毒圈归零时刻：这一份只用来量 Boss 战，
+## 圈一归零所有人必死，跑更长没有信息量。
 const LIMIT: float = 480.0
 const BLOCK: float = 30.0
 const SEEDS: Array[int] = [11, 12, 13]
@@ -313,7 +313,7 @@ func _median(values: Array[float]) -> float:
 	return (sorted[n / 2 - 1] + sorted[n / 2]) * 0.5
 
 
-## 汇总表。看三个数：中位存活（目标 5-7 分钟）、最长（不得超过 11:30）、
+## 汇总表。看三个数：中位存活（目标 5-10 分钟）、最长（不得超过圈归零时间）、
 ## 圈外死亡占比（目标 15%-35%）。没有毒圈的版本看"最长"就知道现在能拖多久。
 func _aggregate() -> String:
 	var lines: PackedStringArray = []
@@ -352,7 +352,7 @@ func _aggregate() -> String:
 	for w in all_wall:
 		if w >= LIMIT - 0.5:
 			timeout += 1
-	lines.append("总体：中位 %5.1fs  最长 %5.1fs  触及上限 %d 局  （11:30 折算 %.0fs）" % [
-		_median(all_wall), all_wall.max() if not all_wall.is_empty() else 0.0, timeout, 690.0,
+	lines.append("总体：中位 %5.1fs  最长 %5.1fs  触及上限 %d 局（上限就是圈归零时刻）" % [
+		_median(all_wall), all_wall.max() if not all_wall.is_empty() else 0.0, timeout,
 	])
 	return String("\n").join(lines)

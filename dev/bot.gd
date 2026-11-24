@@ -13,8 +13,9 @@ extends SceneTree
 ##   kite_ranged 射手绕圈走位、技能好了就放（远程职业：验证"Boss 优先索敌"那条路径）
 ## 必须覆盖远程职业：战士没有远程武器，只用战士测的话子弹相关改动完全测不到。
 
-## 780 秒 = 13 分钟。毒圈上线后一局最迟 11:30 必结算，留 90 秒余量是为了量出
-## "毒圈没起作用"的最坏情况——给到时限都不死，说明圈根本没逼死人。
+## 780 秒 = 13 分钟。毒圈时间轴现在 8:00 归零，留 5 分多钟余量不是为了跑满，
+## 而是为了量出"毒圈根本没起作用"的最坏情况——给到时限都不死，说明圈没逼死人。
+## 别把 LIMIT 调成跟圈上限一样：那样"撞上限"和"被圈毒死"就分不开了。
 const LIMIT: float = 780.0
 const BLOCK: float = 30.0
 ## 5 个种子：3 个太少了。实测存活分布是双峰的（战士要么 3 分钟撞上第二只 Boss，
@@ -335,7 +336,15 @@ func _median(values: Array[float]) -> float:
 	return (sorted[n / 2 - 1] + sorted[n / 2]) * 0.5
 
 
-## 汇总表。看三个数：中位存活（目标 5-7 分钟）、最长（不得超过 11:30）、
+## 一局的理论上限从 Zone 表里读，不在测试里写死。
+## 第一版这里写的是字面量 690.0，时间轴改成 8:00 之后这个指标就永远报 0 了——
+## 一个"改表就失效"的断言比没有断言更坏：它看起来还在工作。
+func _zone_cap() -> float:
+	var segs: Array = Zone.SEGMENTS
+	return float(segs[segs.size() - 1]["to"])
+
+
+## 汇总表。看三个数：中位存活（目标 5-10 分钟）、最长（不得超过圈归零时间）、
 ## 圈外死亡占比（目标 15%-35%）。没有毒圈的版本看"最长"就知道现在能拖多久。
 func _aggregate() -> String:
 	var lines: PackedStringArray = []
@@ -378,15 +387,15 @@ func _aggregate() -> String:
 		var w: float = float(r["wall"])
 		if w >= LIMIT - 0.5:
 			timeout += 1
-		if w > 690.0:
+		if w > _zone_cap():
 			over_cap += 1
 		if str(r["cause"]) != "未死":
 			deaths += 1
 			if str(r["cause"]) == "圈外":
 				zone_deaths += 1
 	var zone_pct: float = 100.0 * float(zone_deaths) / float(maxi(deaths, 1))
-	lines.append("总体：中位 %5.1fs  最长 %5.1fs  触及上限 %d 局  超过 11:30 的 %d 局" % [
-		_median(all_wall), all_wall.max() if not all_wall.is_empty() else 0.0, timeout, over_cap,
+	lines.append("总体：中位 %5.1fs  最长 %5.1fs  触及上限 %d 局  超过圈归零（%.0fs）的 %d 局" % [
+		_median(all_wall), all_wall.max() if not all_wall.is_empty() else 0.0, timeout, _zone_cap(), over_cap,
 	])
 	lines.append("死因：圈外致死 %d/%d 局 = %.0f%%（目标 15%%-35%% 之间）" % [zone_deaths, deaths, zone_pct])
 	return String("\n").join(lines)

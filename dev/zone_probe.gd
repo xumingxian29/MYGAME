@@ -36,51 +36,56 @@ func _check(label: String, ok: bool, detail: String = "") -> void:
 # ---------------------------------------------------------------- 时间轴
 
 func _test_timeline() -> void:
-	print("\n[时间轴]")
+	print("\n[时间轴·按表校验]")
 	var view: float = 545.0
+	var segs: Array = Zone.SEGMENTS
 	var zone := Zone.new()
 	root.add_child(zone)
 	zone.reset(view, 11)
 
-	_check("开局半径 = 2.20V", is_equal_approx(zone.radius, 2.20 * view), "实际 %.1f" % zone.radius)
+	_check("开局半径 = 第一段 r0（%.2fV）" % float(segs[0]["r0"]),
+		is_equal_approx(zone.radius, float(segs[0]["r0"]) * view), "实际 %.1f" % zone.radius)
 	_check("开局毒伤 = 0", is_zero_approx(zone.dps()))
 	_check("开局圈心在原点", zone.center == Vector2.ZERO)
 
-	_advance(zone, 119.0)
-	_check("2:00 前不缩圈", is_equal_approx(zone.radius, 2.20 * view), "实际 %.1f" % zone.radius)
+	# 逐段推进到段尾，验半径与毒伤。表驱动：以后调时间轴不用改这个测试。
+	var prev_end: float = 0.0
+	for i in range(segs.size()):
+		var seg: Dictionary = segs[i]
+		_advance(zone, float(seg["to"]) - prev_end)
+		prev_end = float(seg["to"])
+		var want_r: float = float(seg["r1"]) * view
+		_check("t=%3.0fs 收到 %.2fV（%.0fpx）" % [float(seg["to"]), float(seg["r1"]), want_r],
+			absf(zone.radius - want_r) < 2.0, "实际 %.1f" % zone.radius)
+		# 段边界上读到的可能是本段段尾的毒伤，也可能已经切到下一段的台阶值
+		# （浮点累加让 "正好 185.0s" 有时落在前一段、有时落在后一段），两个都对
+		var end_dps: float = float(seg.get("dps_to", seg["dps"]))
+		var next_dps: float = float(segs[i + 1]["dps"]) if i + 1 < segs.size() else end_dps
+		_check("t=%3.0fs 毒伤 %.1f%%/s" % [float(seg["to"]), end_dps * 100.0],
+			absf(zone.dps() - end_dps) < 0.0002 or absf(zone.dps() - next_dps) < 0.0002,
+			"实际 %.4f" % zone.dps())
 
-	_advance(zone, 46.0)  # t = 165 → 第一段收缩结束
-	_check("2:45 收到 1.50V", absf(zone.radius - 1.50 * view) < 2.0, "实际 %.1f" % zone.radius)
-	_check("2:45 毒伤 1.0%/s", absf(zone.dps() - 0.010) < 1e-6, "实际 %.4f" % zone.dps())
+	# 表本身的自洽性：
+	#   半径必须段段相接——断一截就意味着画面上那条紫线会瞬移
+	#   毒伤**允许**在段首台阶式上调（那是故意的难度台阶），但只能单调不减
+	for i in range(1, segs.size()):
+		var a: Dictionary = segs[i - 1]
+		var b: Dictionary = segs[i]
+		var a_end_dps: float = float(a.get("dps_to", a["dps"]))
+		_check("第 %d 段与上一段半径相接" % i, absf(float(a["r1"]) - float(b["r0"])) < 1e-6)
+		_check("第 %d 段毒伤不倒退" % i, float(b["dps"]) >= a_end_dps - 1e-6,
+			"%.3f → %.3f" % [a_end_dps, float(b["dps"])])
+		_check("第 %d 段时间不倒退" % i, float(b["from"]) < float(b["to"]) and float(a["to"]) <= float(b["from"]) + 1e-6)
 
-	_advance(zone, 75.0)  # t = 240
-	_advance(zone, 45.0)  # t = 285 → 第二段收缩结束
-	_check("4:45 收到 1.10V", absf(zone.radius - 1.10 * view) < 2.0, "实际 %.1f" % zone.radius)
-	_check("4:45 毒伤 1.6%/s", absf(zone.dps() - 0.016) < 1e-6, "实际 %.4f" % zone.dps())
-
-	_advance(zone, 75.0 + 45.0)  # t = 405
-	_check("6:45 收到 0.85V", absf(zone.radius - 0.85 * view) < 2.0, "实际 %.1f" % zone.radius)
-	_check("6:45 毒伤 2.5%/s", absf(zone.dps() - 0.025) < 1e-6, "实际 %.4f" % zone.dps())
-
-	_advance(zone, 75.0 + 45.0)  # t = 525，决战段开始
-	_advance(zone, 55.0)         # t = 580，决战段中（8:45–9:45）
-	_check("决战段毒伤 6.0%/s", absf(zone.dps() - 0.060) < 1e-6, "实际 %.4f" % zone.dps())
-	_advance(zone, 5.0)          # t = 585 → 终局段起点
-	_check("9:45 收到 0.45V", absf(zone.radius - 0.45 * view) < 2.0, "实际 %.1f" % zone.radius)
-	_check("终局起手 10.0%/s", absf(zone.dps() - 0.100) < 1e-6, "实际 %.4f" % zone.dps())
-
-	_advance(zone, 52.5)  # t = 637.5，终局段中点
-	_check("终局毒伤在 10%~18% 之间爬升", zone.dps() > 0.135 and zone.dps() < 0.145, "实际 %.4f" % zone.dps())
-
-	_advance(zone, 70.0)  # t = 707.5，超过 11:30
-	_check("11:30 之后半径归零", zone.radius <= 1.0, "实际 %.1f" % zone.radius)
+	var total: float = float(segs[segs.size() - 1]["to"])
+	_check("整局上限 %.0fs（%.0f:%02.0f）" % [total, floor(total / 60.0), fmod(total, 60.0)], total > 240.0 and total <= 720.0)
 	_check("半径归零后处处是圈外", zone.is_outside(zone.center + Vector2(100, 0)))
 
 	zone.queue_free()
 
 
 ## 一次推进 delta 秒，按 0.1 秒一步——tick 内部是按段插值的，
-## 一步跨过整个段会把段内过渡直接跳过，测不出"到底是哪一秒收完"。
+## 一步跨过整段会把段内过渡直接跳过，测不出"到底是哪一秒收完"。
 func _advance(zone: Zone, delta: float) -> void:
 	var left: float = delta
 	while left > 0.0:
@@ -133,16 +138,19 @@ func _test_wiring() -> void:
 		"圈心 %s 玩家 %s" % [zone.center, player.global_position])
 
 	# 圈外掉血
-	_advance(zone, 200.0)  # t≈200：1.50V，1.0%/s
+	# 推到第一个"稳定段"中部：那一段 dps 恒定，量出来才好比对
+	var stable: Dictionary = Zone.SEGMENTS[2]
+	_advance(zone, (float(stable["from"]) + float(stable["to"])) * 0.5)
+	var rate: float = float(stable["dps"])
 	player.global_position = zone.center + Vector2(zone.radius + 120.0, 0.0)
 	var hp0: float = player.health
 	# 计时器要先清零：await 期间物理帧已经跑过，残留的零头会让这一跳变成 0.53 秒
 	game._zone_dmg_timer = 0.0
 	# 一次调用正好攒满 ZONE_TICK，结算一跳；调两次会结算两跳，读数就对不上了
 	game._tick_zone(0.5)
-	var expect: float = player.max_health * 0.010 * 0.5
+	var expect: float = player.max_health * rate * 0.5
 	var lost: float = hp0 - player.health
-	_check("圈外 0.5 秒掉 1.0%% 生命（掉 %.2f，期望 %.2f）" % [lost, expect], absf(lost - expect) < 0.05)
+	_check("圈外 0.5 秒掉 %.1f%% 生命（掉 %.2f，期望 %.2f）" % [rate * 100.0, lost, expect], absf(lost - expect) < 0.05)
 
 	# 圈内不掉
 	player.global_position = zone.center
@@ -179,6 +187,17 @@ func _test_wiring() -> void:
 
 ## 只看图不看数：把圈推到 4:00（第一次进屏幕）、7:00（边界在屏幕内）、10:00（终局），
 ## 各存一张 png。headless 下拿不到帧，必须开窗跑（去掉 --headless）。
+## 三个关键时刻：第二次缩完（边界进屏幕）、决战开始、终局中点。
+## 从表里取，改时间轴后截图点自动跟着变。
+func _shot_times() -> Array:
+	var segs: Array = Zone.SEGMENTS
+	return [
+		float(segs[3]["to"]),
+		float(segs[8]["from"]),
+		(float(segs[9]["from"]) + float(segs[9]["to"])) * 0.5,
+	]
+
+
 func _test_shots() -> void:
 	if not _want_shots:
 		return
@@ -190,7 +209,7 @@ func _test_shots() -> void:
 	game._on_menu_started("探针", HeroClass.WARRIOR)
 	await process_frame
 	var zone: Zone = game.zone
-	for t in [240.0, 420.0, 600.0]:
+	for t in _shot_times():
 		_advance(zone, float(t) - zone.elapsed())
 		game._update_hud()
 		await RenderingServer.frame_post_draw
@@ -220,7 +239,8 @@ func _test_lethal() -> void:
 
 	var zone: Zone = game.zone
 	var player: Player = game.player
-	_advance(zone, 590.0)  # 终局段，10%/s 起
+	# 终局段起点 + 10 秒：这一段 10%~18%/s，足够把 1 点血烧掉
+	_advance(zone, float(Zone.SEGMENTS[Zone.SEGMENTS.size() - 1]["from"]) + 10.0)
 	player.global_position = zone.center + Vector2(zone.radius + 200.0, 0.0)
 	player.health = 1.0
 	game._tick_zone(0.5)

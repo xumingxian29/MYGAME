@@ -1,5 +1,12 @@
 extends SceneTree
 
+func _is_test_name(name: String) -> bool:
+	for prefix in ["触屏", "诊断", "探针", "bot"]:
+		if name.begins_with(prefix):
+			return true
+	return false
+
+
 func _init() -> void:
 	var path := "user://records.json"
 	if not FileAccess.file_exists(path):
@@ -16,11 +23,13 @@ func _init() -> void:
 	var players: Dictionary = data.get("players", {})
 	var removed: Array[String] = []
 	for key in players.keys():
-		if str(key).begins_with("触屏") or str(key).begins_with("诊断"):
+		# 自检用过的名字：触屏探针、诊断、毒圈探针、平衡 bot。
+		# 它们会出现在开始菜单的战绩榜里，不清理的话玩家会看到"bot 668153 分"。
+		if _is_test_name(str(key)):
 			players.erase(key)
 			removed.append(str(key))
 	data["players"] = players
-	if str(data.get("last_player", "")).begins_with("触屏") or str(data.get("last_player", "")).begins_with("诊断"):
+	if _is_test_name(str(data.get("last_player", ""))):
 		data["last_player"] = ""
 	var out := FileAccess.open(path, FileAccess.WRITE)
 	out.store_string(JSON.stringify(data, "\t"))
