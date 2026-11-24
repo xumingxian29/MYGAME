@@ -3,16 +3,24 @@ extends RefCounted
 
 ## HUD 与开始菜单共用的排版零件，保证字体、面板、描边风格一致。
 
-const FONT_NAMES: PackedStringArray = ["Microsoft YaHei", "SimHei", "Segoe UI"]
+## 内嵌字体，不用 SystemFont：Web 平台访问不到操作系统字体，SystemFont 会
+## 静默退化成引擎内置的 OpenSans，中文全部变成方块。字体文件必须打进库里。
+## 该文件是 Noto Sans SC 的子集（ASCII + GB2312 全表 + 项目文案），约 1.5MB。
+const FONT_PATH: String = "res://assets/fonts/NotoSansSC-subset.otf"
 
-static var _cached_font: SystemFont
+static var _cached_font: Font
 
 
-## 系统字体只建一次：中文用微软雅黑，缺失时退回黑体 / Segoe UI
-static func font() -> SystemFont:
+## 字体只加载一次。调用方签名保持返回 Font，Label / draw_string 都接受。
+static func font() -> Font:
 	if _cached_font == null:
-		_cached_font = SystemFont.new()
-		_cached_font.font_names = FONT_NAMES
+		var loaded: Resource = load(FONT_PATH) if ResourceLoader.exists(FONT_PATH) else null
+		if loaded is Font:
+			_cached_font = loaded
+		else:
+			# 字体丢了也不能让 UI 建不出来：宁可显示方块，也要保证游戏能进
+			push_warning("字体加载失败，退回引擎内置字体：%s" % FONT_PATH)
+			_cached_font = ThemeDB.fallback_font
 	return _cached_font
 
 

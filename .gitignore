@@ -5,3 +5,6 @@
 # 本地验收残留（不属于游戏内容）
 .workbuddy/test_records_backup.cfg
 .workbuddy/verify.txt
+
+# Web 构建产物（可随时重新导出，不入库）
+build/
