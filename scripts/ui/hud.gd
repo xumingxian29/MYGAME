@@ -45,6 +45,37 @@ var _best_label: Label
 var _panel: PanelContainer
 var _panel_box: VBoxContainer
 var _dim: ColorRect
+## 屏顶 Boss 血条：名字 + 阶段 + 一条长血。只在 Boss 战期间显示。
+var _boss_panel: PanelContainer
+var _boss_bar: ProgressBar
+var _boss_name_label: Label
+var _boss_phase_label: Label
+## 章节栏：标题 + 进度条。进度条在 Boss 战期间停在一半（章节时钟也停着），
+## 打完 Boss 换章时归零，所以"条走到头"和"Boss 出现"在玩家眼里是同一件事。
+var _stage_label: Label
+var _stage_bar: ProgressBar
+var _stage_bar_color: Color = Color.WHITE
+## 上一帧是否处于关底状态：只在翻转时改一次控件主题色，
+## 否则 10Hz 的 HUD 刷新会每 0.1 秒重建一次 StyleBox
+var _stage_boss: bool = false
+## 屏外方向箭头：圈心滑出屏幕后唯一的"往哪跑"提示
+var _zone_arrow: ZoneArrow
+## 安全区倒计时：常驻一行，收缩时变成"收缩中 + 秒数"，圈外时整行变红。
+## 不放在屏幕中央——那会挡住走位视线；玩家只要能用余光读到"还有多久就要缩"就够。
+var _zone_label: Label
+var _zone_danger: bool = false
+## 章节横幅：进章/通关时在屏幕上方短暂显示的大字。
+## 不做成暂停式弹窗——玩家在打怪，突然被一张"第一章"挡住两秒会挨打。
+var _banner: Control
+var _banner_box: VBoxContainer
+var _banner_title: Label
+var _banner_sub: Label
+var _banner_t: float = 0.0
+
+## 横幅总时长与淡入/淡出段：淡入要快（玩家在等结果），淡出要慢（不然像闪烁）
+const BANNER_TIME: float = 3.0
+const BANNER_FADE_IN: float = 0.28
+const BANNER_FADE_OUT: float = 0.85
 
 
 func _ready() -> void:
@@ -74,6 +105,11 @@ func _build() -> void:
 	_vignette.material = _vignette_mat
 	_root.add_child(_vignette)
 
+	# 方向箭头紧跟红边之后：都在所有文字之下，不会盖住任何读数
+	_zone_arrow = ZoneArrow.new()
+	_zone_arrow.name = "ZoneArrow"
+	_root.add_child(_zone_arrow)
+
 	var corner := VBoxContainer.new()
 	corner.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	corner.position = Vector2(20, 16)
@@ -96,6 +132,19 @@ func _build() -> void:
 	_mp_bar = _mp_gauge.get_node("Bar") as ProgressBar
 	_mp_text = _mp_gauge.get_node("Text") as Label
 	corner.add_child(_mp_gauge)
+
+	# 章节：紧贴三条状态条下面。玩家最常看的两个数就是"我还有多少血"和
+	# "这一章还剩多少"，放在同一列才不用来回找。
+	_stage_label = _make_label("", 13, Color(0.7, 0.86, 0.92))
+	corner.add_child(_stage_label)
+	_stage_bar = _make_bar(Color(0.42, 0.82, 0.78), Vector2(260, 5))
+	_stage_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_stage_bar_color = Color(0.42, 0.82, 0.78)
+	corner.add_child(_stage_bar)
+
+	# 安全区倒计时紧跟在章节条后面：两者都是"限时"信息，放一起形成一个时间区。
+	_zone_label = _make_label("", 13, Color(0.78, 0.66, 1.0))
+	corner.add_child(_zone_label)
 
 	_stats_label = _make_label("", 16, Color(0.82, 0.88, 0.98))
 	corner.add_child(_stats_label)
@@ -120,6 +169,9 @@ func _build() -> void:
 		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		right.add_child(label)
 
+	_build_boss_bar()
+	_build_banner()
+
 	# 压暗遮罩：升级与死亡时都复用，避免游戏物体压住面板文字
 	_dim = ColorRect.new()
 	_dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -141,6 +193,108 @@ func _build() -> void:
 	_panel_box = VBoxContainer.new()
 	_panel_box.add_theme_constant_override("separation", 10)
 	_panel.add_child(_panel_box)
+
+
+## 屏顶 Boss 血条。不抢左右两栏的位置：桌面上居中贴顶，触屏上整体下移到状态条
+## 下方（960 基准下左右两栏已经吃到 280 / 600，中间只剩 320 宽，塞不下 460 的条）。
+func _build_boss_bar() -> void:
+	_boss_panel = PanelContainer.new()
+	_boss_panel.name = "BossBar"
+	_boss_panel.anchor_left = 0.5
+	_boss_panel.anchor_right = 0.5
+	_boss_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_boss_panel.visible = false
+	_boss_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.95, 0.36, 0.4, 0.9)))
+	_root.add_child(_boss_panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 4)
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_boss_panel.add_child(box)
+
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 10)
+	head.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(head)
+
+	_boss_name_label = _make_label("", 17, Color(1.0, 0.87, 0.87))
+	_boss_name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(_boss_name_label)
+
+	_boss_phase_label = _make_label("", 13, Color(0.96, 0.74, 0.74))
+	_boss_phase_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	head.add_child(_boss_phase_label)
+
+	_boss_bar = _make_bar(Color(0.92, 0.27, 0.32), Vector2(420, 15))
+	_boss_bar.max_value = 1.0
+	_boss_bar.value = 1.0
+	_boss_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(_boss_bar)
+	_layout_boss_bar()
+
+
+## 触屏的基准分辨率小一圈，但左右两栏的像素宽度不变，所以条要缩窄并下移，
+## 否则会盖到左上角的血条和右上角的分数。
+func _layout_boss_bar() -> void:
+	if _boss_panel == null:
+		return
+	var width: float = 340.0 if _touch_mode else 460.0
+	_boss_panel.offset_left = -width * 0.5
+	_boss_panel.offset_right = width * 0.5
+	_boss_panel.offset_top = 104.0 if _touch_mode else 12.0
+	if _boss_bar != null:
+		_boss_bar.custom_minimum_size = Vector2(width - 24.0, 15.0)
+
+
+## 章节横幅。整块 Control 铺满屏幕但 IGNORE 鼠标，文字用描边而不是底色块：
+## 战场上每帧都在变，一块半透明底板会跟着怪一起晃眼，描边字更干净。
+## 位置放在纵向 16%，避开左上角的状态条和屏顶的 Boss 血条。
+func _build_banner() -> void:
+	_banner = Control.new()
+	_banner.name = "StageBanner"
+	_banner.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_banner.visible = false
+	_root.add_child(_banner)
+
+	_banner_box = VBoxContainer.new()
+	_banner_box.anchor_left = 0.0
+	_banner_box.anchor_right = 1.0
+	_banner_box.anchor_top = 0.16
+	_banner_box.anchor_bottom = 0.16
+	_banner_box.offset_left = 32.0
+	_banner_box.offset_right = -32.0
+	_banner_box.add_theme_constant_override("separation", 4)
+	_banner_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_banner.add_child(_banner_box)
+
+	_banner_title = _make_label("", 42, Color.WHITE)
+	_apply_banner_outline(_banner_title, 8)
+	_banner_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_banner_box.add_child(_banner_title)
+
+	_banner_sub = _make_label("", 17, Color(0.86, 0.92, 1.0))
+	_apply_banner_outline(_banner_sub, 5)
+	_banner_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_banner_sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_banner_box.add_child(_banner_sub)
+	_layout_banner()
+
+
+## 触屏上 Boss 血条被下移到 y=104（否则会盖住左上角状态条），
+## 横幅必须跟着让开，不然章节名会被血条压住——而"这是第几章"正是横幅唯一的信息。
+func _layout_banner() -> void:
+	if _banner_box == null:
+		return
+	var anchor: float = 0.36 if _touch_mode else 0.16
+	_banner_box.anchor_top = anchor
+	_banner_box.anchor_bottom = anchor
+
+
+func _apply_banner_outline(label: Label, size: int) -> void:
+	label.add_theme_constant_override("outline_size", size)
+	label.add_theme_color_override("font_color", Color.WHITE)
+	label.add_theme_color_override("font_outline_color", Color(0.02, 0.03, 0.05, 0.92))
 
 
 # ---------------------------------------------------------------- 对外接口
@@ -186,10 +340,13 @@ func set_hero(hero: int) -> void:
 	_refresh_mana_text()
 
 
-## 打开触屏模式：只影响文案与结算面板的操作方式，数值与布局不变
+## 触屏模式开关：只影响文案与结算面板的操作方式，数值与布局不变。
+## Boss 血条例外——它的宽度和下移量依赖基准分辨率，必须重排一次。
 func set_touch_mode(enabled: bool) -> void:
 	_touch_mode = enabled
 	_refresh_mana_text()
+	_layout_boss_bar()
+	_layout_banner()
 
 
 func is_touch_mode() -> bool:
@@ -244,7 +401,129 @@ func set_danger(level: float) -> void:
 	_danger_target = clampf(level, 0.0, 1.0)
 
 
+# ---------------------------------------------------------------- 章节
+
+## 章节标题 + 进度。progress 由 Game 按"本章已过秒数 / 本章时长"给，
+## 关底期间章节时钟是停的，所以条会走到 100% 停住并变红——
+## "条满了"和"Boss 出来了"在玩家眼里是同一件事。
+func set_stage(title: String, progress: float, boss_alive: bool, tint: Color) -> void:
+	if _stage_label == null:
+		return
+	_set_text(_stage_label, "%s　·　关底" % title if boss_alive else title)
+	_stage_bar.value = clampf(progress, 0.0, 1.0) * 100.0
+
+	var fill: Color = Color(0.94, 0.34, 0.36) if boss_alive else tint
+	if fill != _stage_bar_color:
+		_stage_bar_color = fill
+		_stage_bar.add_theme_stylebox_override("fill", UiKit.flat(fill, Color.TRANSPARENT, 3, 0))
+	if boss_alive != _stage_boss:
+		_stage_boss = boss_alive
+		_stage_label.add_theme_color_override(
+			"font_color",
+			Color(1.0, 0.68, 0.64) if boss_alive else Color(0.72, 0.9, 0.95),
+		)
+
+
+## 屏外方向箭头。dir_px 是玩家指向圈心的屏幕像素位移（世界位移 × 相机缩放）。
+func set_zone_direction(dir_px: Vector2, outside: bool) -> void:
+	if _zone_arrow == null:
+		return
+	_zone_arrow.set_target(dir_px, outside)
+
+
+## 安全区倒计时。文字由 Game 拼好（它才知道阶段名与剩余秒数），
+## HUD 只负责"显示 + 换色"。圈外时用红色，和右下角的血量告急区分开：
+## 血量红边是"你要死了"，圈外红字是"你现在正在掉血"。
+func set_zone_status(text: String, danger: bool) -> void:
+	if _zone_label == null:
+		return
+	_set_text(_zone_label, text)
+	# 10Hz 刷新下每帧都 add_theme_color_override 会持续重建 ThemeItem，
+	# 和 _stage_boss 一样只在翻转时改一次
+	if danger != _zone_danger:
+		_zone_danger = danger
+		_zone_label.add_theme_color_override(
+			"font_color",
+			Color(1.0, 0.42, 0.42) if danger else Color(0.78, 0.66, 1.0),
+		)
+
+
+## 章节横幅。cleared 时换成金色，和"进新章"区分开：
+## 通关是这一局唯一的一次性事件，不能和普通的换章长得一样。
+func show_banner(title: String, subtitle: String, tint: Color, cleared: bool) -> void:
+	if _banner == null:
+		return
+	_set_text(_banner_title, title)
+	_set_text(_banner_sub, subtitle)
+	var accent: Color = Color(1.0, 0.88, 0.46) if cleared else tint.lightened(0.35)
+	_banner_title.add_theme_color_override("font_color", accent)
+	_banner_sub.add_theme_color_override("font_color", accent.lightened(0.4))
+	_banner.modulate.a = 0.0
+	_banner.visible = true
+	_banner_t = BANNER_TIME
+
+
+func hide_banner() -> void:
+	_banner_t = 0.0
+	if _banner != null:
+		_banner.visible = false
+		_banner.modulate.a = 0.0
+
+
+## 淡入快、淡出慢：淡入时玩家在等结果，拖沓会像卡了；淡出时不该打断读字。
+func _tick_banner(delta: float) -> void:
+	if _banner_t <= 0.0:
+		if _banner != null and _banner.visible:
+			_banner.visible = false
+		return
+	_banner_t = maxf(_banner_t - delta, 0.0)
+	var shown: float = BANNER_TIME - _banner_t
+	var alpha: float = minf(shown / BANNER_FADE_IN, _banner_t / BANNER_FADE_OUT)
+	_banner.modulate.a = clampf(alpha, 0.0, 1.0)
+
+
+# ---------------------------------------------------------------- Boss 血条
+
+## 开一场 Boss 战。血量与阶段随后由 set_boss_health / set_boss_phase 推进，
+## 这里只负责把条亮出来并归位。
+## style 是这只 Boss 的招式风格名（潮汐/游影/深噬）。三只 Boss 的招式不同，
+## 光写名字玩家分不出"这次打的是不是同一套"，所以名字后面带上它怎么打。
+func show_boss(boss_name: String, style: String = "") -> void:
+	if _boss_panel == null:
+		return
+	_set_text(_boss_name_label, boss_name if style.is_empty() else "%s · %s" % [boss_name, style])
+	set_boss_phase(0)
+	_boss_bar.value = 1.0
+	_boss_panel.visible = true
+
+
+func set_boss_health(ratio: float) -> void:
+	if _boss_bar == null:
+		return
+	_boss_bar.value = clampf(ratio, 0.0, 1.0)
+
+
+## 二阶段把血条换成橙红：光看条长短玩家不一定注意到"它换招式了"
+func set_boss_phase(phase: int) -> void:
+	if _boss_phase_label == null:
+		return
+	_set_text(_boss_phase_label, "第二阶段" if phase >= 1 else "第一阶段")
+	var fill: Color = Color(1.0, 0.62, 0.24) if phase >= 1 else Color(0.92, 0.27, 0.32)
+	_boss_bar.add_theme_stylebox_override("fill", UiKit.flat(fill, Color.TRANSPARENT, 4, 0))
+
+
+func hide_boss() -> void:
+	if _boss_panel != null:
+		_boss_panel.visible = false
+
+
 func _process(delta: float) -> void:
+	# 暂停时只冻结横幅，不冻结红边。
+	# 横幅是"这一章开始了"的一次性提示，暂停期间不该偷偷放完（升级面板一压暗就看不见了）；
+	# 但红边必须继续衰减：死亡时整棵树被暂停，如果连红边也冻住，
+	# 结算面板背后会永远挂着一圈满强度红光。
+	if not get_tree().paused:
+		_tick_banner(delta)
 	if _vignette_mat == null:
 		return
 	# 用缓动追随而不是直接赋值：血量回满时红边是"退下去"，不是啪一下消失
@@ -288,12 +567,14 @@ func open_level_up(level: int, choices: Array[Dictionary], next_level: int) -> v
 
 	_dim.visible = true
 	_panel.visible = true
+	# 面板一压暗，横幅就只剩一层灰底，留着只会让标题和卡片抢注意力。
+	# 章节名已经在左上角常驻，横幅的使命（"你换章了"）在面板弹出前就完成了。
+	hide_banner()
 
 
 func close_level_up() -> void:
 	_panel.visible = false
 	_dim.visible = false
-
 
 ## 结算面板：result 由 Game 构建，含总分拆解与该昵称的个人纪录。
 func show_game_over(result: Dictionary) -> void:
@@ -303,8 +584,13 @@ func show_game_over(result: Dictionary) -> void:
 
 	var profile: Dictionary = result["profile"]
 	var best: Dictionary = profile["best"]
+	var cleared: bool = bool(result.get("cleared", false))
 
-	var title := _make_label("你被淹没了", 30, Color(1.0, 0.86, 0.86))
+	# 通关局不该说"你被淹没了"：那会让唯一的正面结果读起来像失败。
+	var title := _make_label(
+		"你走完了三章" if cleared else "你被淹没了",
+		30, Color(1.0, 0.9, 0.62) if cleared else Color(1.0, 0.86, 0.86),
+	)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(title)
 
@@ -312,16 +598,34 @@ func show_game_over(result: Dictionary) -> void:
 	who.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(who)
 
+	# 死因单独一行：不加这句，"怎么死的"只能靠玩家自己回忆最后两秒。
+	# 通关局不显示——那局不是被打死的。
+	if not cleared:
+		var by_zone: bool = str(result.get("death_cause", "敌人")) == "圈外"
+		var cause := _make_label(
+			"死因：倒在安全区外" if by_zone else "死因：被敌人淹没",
+			13, Color(0.86, 0.7, 1.0) if by_zone else Color(0.82, 0.66, 0.66),
+		)
+		cause.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_panel_box.add_child(cause)
+
 	_panel_box.add_child(_divider())
+	# Boss 数单独列出来：它是这局唯一的里程碑，混在"击杀 N 只"里等于没发生
+	var kill_detail: String = "%d 只 · 精英 %d" % [int(result["kills"]), int(result["elite_kills"])]
+	var boss_kills: int = int(result.get("boss_kills", 0))
+	if boss_kills > 0:
+		kill_detail += " · Boss %d" % boss_kills
 	_panel_box.add_child(_stat_row(
 		"击杀",
-		"%d 只 · 精英 %d" % [int(result["kills"]), int(result["elite_kills"])],
+		kill_detail,
 		"+%d" % int(result["kill_points"]),
 		Color(0.9, 0.72, 0.72),
 	))
+	# 存活行带上章节名：只给一个秒数回答不了"我这局打到哪了"，
+	# 而对刷怪游戏来说，"推进到第几章"才是玩家真正记得住的进度。
 	_panel_box.add_child(_stat_row(
 		"存活",
-		str(result["time_text"]),
+		"%s · %s" % [str(result["time_text"]), str(result.get("stage_name", ""))],
 		"+%d" % int(result["time_points"]),
 		Color(0.72, 0.86, 0.98),
 	))
@@ -331,6 +635,15 @@ func show_game_over(result: Dictionary) -> void:
 		"+%d" % int(result["growth_points"]),
 		Color(0.78, 0.92, 0.78),
 	))
+	# 通关行只在对局真的走完三章时出现：没通关的人不该看到一行 "+0"，
+	# 那会把"没做到"变成显式的扣分，而不是留白。
+	if cleared:
+		_panel_box.add_child(_stat_row(
+			"关卡",
+			"三章通关 · 附加奖励",
+			"+%d" % int(result.get("clear_points", 0)),
+			Color(1.0, 0.84, 0.42),
+		))
 	_panel_box.add_child(_divider())
 
 	var total_row := HBoxContainer.new()
@@ -363,10 +676,11 @@ func show_game_over(result: Dictionary) -> void:
 	record.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(record)
 
-	if _touch_mode:
-		_panel_box.add_child(_make_action_row())
-	else:
-		var hint := _make_label("R 再来一局        P 换人", 15, Color(0.8, 0.86, 0.94))
+	# 鼠标和触屏都必须能点：早先桌面端只给一行快捷键文字，用鼠标的玩家在结算页点不动
+	# （试玩反馈：只能靠快捷键回主界面）。快捷键保留为附加路径，不再是唯一路径。
+	_panel_box.add_child(_make_action_row())
+	if not _touch_mode:
+		var hint := _make_label("快捷键：R 再来一局　P / ESC 换人", 13, Color(0.62, 0.7, 0.84))
 		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		_panel_box.add_child(hint)
 
@@ -374,14 +688,19 @@ func show_game_over(result: Dictionary) -> void:
 	_panel.visible = true
 
 
-## 触屏结算的两个大按钮。尺寸按 960 基准的设计宽度给（约 120×38 CSS 像素），
-## 再小就点不准了；键盘的 R / P 依然有效，两条路径互不干扰。
+## 结算的两个大按钮，桌面与触屏共用。尺寸按 960 基准的设计宽度给（约 120×38 CSS 像素），
+## 再小就点不准；键盘的 R / P / ESC 依然有效，两条路径互不干扰。
 func _make_action_row() -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", 14)
-	row.add_child(_make_action_button("再来一局", Color(1.0, 0.85, 0.48), restart_requested.emit))
-	row.add_child(_make_action_button("换人", Color(0.52, 0.68, 0.92), menu_requested.emit))
+	var retry := _make_action_button("再来一局", Color(1.0, 0.85, 0.48), restart_requested.emit)
+	var swap := _make_action_button("换人", Color(0.52, 0.68, 0.92), menu_requested.emit)
+	# 默认选中「再来一局」：键盘党死亡后直接按回车就重开，不用先摸鼠标去点
+	retry.focus_mode = Control.FOCUS_ALL
+	row.add_child(retry)
+	row.add_child(swap)
+	retry.call_deferred("grab_focus")
 	return row
 
 
@@ -398,6 +717,8 @@ func _make_action_button(text: String, accent: Color, callback: Callable) -> But
 	button.add_theme_stylebox_override("normal", UiKit.flat(accent, accent.lightened(0.35), 10, 0))
 	button.add_theme_stylebox_override("hover", UiKit.flat(accent.lightened(0.12), accent.lightened(0.5), 10, 0))
 	button.add_theme_stylebox_override("pressed", UiKit.flat(accent.darkened(0.12), accent.lightened(0.3), 10, 0))
+	# 键盘选中态：外圈加一道亮边，否则拿到焦点也看不出来
+	button.add_theme_stylebox_override("focus", UiKit.flat(accent.lightened(0.16), accent.lightened(0.75), 10, 3))
 	button.pressed.connect(callback)
 	return button
 
@@ -405,6 +726,7 @@ func _make_action_button(text: String, accent: Color, callback: Callable) -> But
 func clear_overlays() -> void:
 	_panel.visible = false
 	_dim.visible = false
+	hide_banner()
 
 
 # ---------------------------------------------------------------- 面板零件

@@ -11,10 +11,16 @@ const PANEL_WIDTH: float = 640.0
 ## 榜单最多显示几条，避免玩家人数过多把面板撑出屏幕
 const MAX_ROWS: int = 6
 
+## 昵称框右侧的兜底按钮：万一某个浏览器没实现软键盘（Web 导出必须打开
+## html/experimental_virtual_keyboard，否则 FEATURE_VIRTUAL_KEYBOARD 一直是 false），
+## 玩家至少还能抽一个名字开局，不会卡在起名这一步。
+const RANDOM_NAMES: Array[String] = ["守夜人", "拾骨者", "潮汐", "锈剑", "灯奴", "深潜者", "夜巡", "残灯"]
+
 var _root: Control
 var _panel: PanelContainer
 var _box: VBoxContainer
 var _input: LineEdit
+var _random_btn: Button
 var _list: VBoxContainer
 var _empty_label: Label
 var _desc_label: Label
@@ -69,6 +75,13 @@ func _build() -> void:
 	var subtitle := UiKit.label("选择职业 · 躲避怪潮 · 升级强化", 13, Color(0.68, 0.76, 0.9))
 	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_box.add_child(subtitle)
+
+	# 一局的结构直接写在这里，而不是塞一段教程：玩家在菜单停留的时间最长，
+	# 一行字就能回答"这游戏要打到哪一步算赢"。没有这句话时，
+	# 试玩反馈里"规则不清晰"说的正是"不知道自己在往哪打"。
+	var route := UiKit.label("三章 · 每章关底一只 Boss · 走完三章进入无尽", 12, Color(0.6, 0.74, 0.68))
+	route.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_box.add_child(route)
 
 	_box.add_child(UiKit.divider())
 	_build_class_picker()
@@ -142,7 +155,16 @@ func _build_columns() -> void:
 	_input.add_theme_stylebox_override("normal", input_normal)
 	_input.add_theme_stylebox_override("focus", input_focus)
 	_input.text_submitted.connect(_on_submitted)
-	left.add_child(_input)
+	_input.gui_input.connect(_on_name_gui_input)
+
+	# 输入框与兜底按钮并排；按钮平时隐藏，只在"没有软键盘可用"的设备上才出现
+	var name_row := HBoxContainer.new()
+	name_row.add_theme_constant_override("separation", 8)
+	left.add_child(name_row)
+	_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	name_row.add_child(_input)
+	_random_btn = _make_random_name_button()
+	name_row.add_child(_random_btn)
 
 	left.add_child(_make_start_button())
 
@@ -217,6 +239,54 @@ func _make_start_button() -> Button:
 	return button
 
 
+func _make_random_name_button() -> Button:
+	var button := Button.new()
+	button.text = "随机"
+	button.custom_minimum_size = Vector2(72, 42)
+	button.focus_mode = Control.FOCUS_NONE
+	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	button.visible = false
+	button.add_theme_font_override("font", UiKit.font())
+	button.add_theme_font_size_override("font_size", 16)
+	for key in ["font_color", "font_hover_color", "font_pressed_color"]:
+		button.add_theme_color_override(key, Color(0.86, 0.92, 1.0))
+	button.add_theme_stylebox_override("normal", UiKit.flat(Color(0.13, 0.17, 0.24), Color(1.0, 1.0, 1.0, 0.22), 8, 1))
+	button.add_theme_stylebox_override("hover", UiKit.flat(Color(0.18, 0.23, 0.32), Color(0.55, 0.75, 1.0, 0.8), 8, 1))
+	button.add_theme_stylebox_override("pressed", UiKit.flat(Color(0.22, 0.28, 0.38), Color(0.55, 0.75, 1.0, 0.9), 8, 1))
+	button.pressed.connect(_on_random_name)
+	return button
+
+
+## 点输入框必须主动请求软键盘。Web 导出如果没打开 html/experimental_virtual_keyboard，
+## DisplayServer 根本不实现 FEATURE_VIRTUAL_KEYBOARD，键盘永远不出现（试玩反馈的根因）。
+## 请求要写在同一次输入事件里：等下一帧再调，iOS 会判成"非用户手势"直接拒绝。
+func _on_name_gui_input(event: InputEvent) -> void:
+	var tapped: bool = false
+	var touch := event as InputEventScreenTouch
+	if touch != null:
+		tapped = touch.pressed
+	var mouse := event as InputEventMouseButton
+	if mouse != null:
+		tapped = mouse.pressed and mouse.button_index == MOUSE_BUTTON_LEFT
+	if not tapped:
+		return
+	_input.grab_focus()
+	_input.select_all()
+	if DisplayServer.has_feature(DisplayServer.FEATURE_VIRTUAL_KEYBOARD):
+		DisplayServer.virtual_keyboard_show(
+			_input.text,
+			Rect2(_input.get_screen_position(), _input.size),
+			DisplayServer.KEYBOARD_TYPE_DEFAULT,
+			_input.max_length,
+		)
+
+
+func _on_random_name() -> void:
+	var name: String = RANDOM_NAMES[randi() % RANDOM_NAMES.size()]
+	_input.text = ScoreBoard.sanitize("%s%02d" % [name, randi_range(2, 99)])
+	_input.caret_column = _input.text.length()
+
+
 # ---------------------------------------------------------------- 对外接口
 
 func open(default_name: String, players: Array[Dictionary], hero: int = HeroClass.WARRIOR,
@@ -229,6 +299,9 @@ func open(default_name: String, players: Array[Dictionary], hero: int = HeroClas
 	_refresh(players)
 	_select_hero(hero)
 	_input.text = default_name
+	# 没有软键盘可用时才亮出"随机"按钮，正常桌面端和开了软键盘的手机都看不到它
+	if _random_btn != null:
+		_random_btn.visible = _touch_mode and not DisplayServer.has_feature(DisplayServer.FEATURE_VIRTUAL_KEYBOARD)
 	# 触屏上不抢焦点：点输入框时系统才弹软键盘，否则一进菜单半个屏幕都是键盘
 	if not _touch_mode:
 		# 预选整段，直接打字即覆盖旧昵称
@@ -239,6 +312,8 @@ func open(default_name: String, players: Array[Dictionary], hero: int = HeroClas
 func close() -> void:
 	_root.visible = false
 	_input.release_focus()
+	if DisplayServer.has_feature(DisplayServer.FEATURE_VIRTUAL_KEYBOARD):
+		DisplayServer.virtual_keyboard_hide()
 
 
 func is_open() -> bool:
@@ -325,4 +400,6 @@ func _on_start_pressed() -> void:
 
 
 func _on_submitted(text: String) -> void:
+	if DisplayServer.has_feature(DisplayServer.FEATURE_VIRTUAL_KEYBOARD):
+		DisplayServer.virtual_keyboard_hide()
 	_start_with(text)

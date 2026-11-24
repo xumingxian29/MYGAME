@@ -18,6 +18,10 @@ const NOVA_SLOW_FACTOR: float = 0.45
 const ARROW_COUNT: int = 14
 const ARROW_DAMAGE_SCALE: float = 2.2
 const ARROW_PIERCE: int = 3
+## 射手是三个职业里唯一没有脱身手段的（战士有击退+1.2 秒无敌，法师新星半径 285
+## 直接把贴脸的一圈清掉）。箭雨原本纯伤害，被围住时按了也出不来。
+## 比战士的 1.2 秒短，因为同一发技能还打出 14 支穿透箭，攻防都占。
+const ARROW_INVULN: float = 0.8
 
 
 static func cast(hero: int, player: Player, enemies: Array[Enemy]) -> void:
@@ -67,6 +71,7 @@ static func _nova(player: Player, enemies: Array[Enemy]) -> void:
 ## 射手：全向齐射。借用子弹武器的弹道系统，不另写一套飞行逻辑，
 ## 这样穿透、命中判定、火花反馈的规则与普攻完全一致。
 static func _arrow_rain(player: Player) -> void:
+	player.grant_invuln(ARROW_INVULN)
 	player.spawn_skill_fx(90.0, Color(0.45, 0.95, 0.7))
 	player.add_trauma(0.35)
 	if player.bullet_weapon != null:

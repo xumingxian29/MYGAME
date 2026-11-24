@@ -8,3 +8,9 @@
 
 # Web 构建产物（可随时重新导出，不入库）
 build/
+
+# 自检残留（可重新生成，不属于游戏内容）
+.workbuddy/*.txt
+.workbuddy/*.png
+.workbuddy/backup/
+.wbapp_*.genie

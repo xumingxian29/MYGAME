@@ -7,12 +7,18 @@ extends Node2D
 
 ## 粒子数硬上限。超出后新的直接丢弃：视觉上早已乱成一团，多画也看不出来。
 const MAX_PARTICLES: int = 260
+## 触屏设备上限。火花是纯装饰，手机上砍半后密度差别肉眼难辨，
+## 但每帧 draw_line 的条数直接少一半——这是手机上最便宜的帧率来源。
+const MOBILE_MAX_PARTICLES: int = 120
 const BASE_LIFE: float = 0.24
 const SPEED_MIN: float = 90.0
 const SPEED_MAX: float = 260.0
 ## 每秒阻尼系数与重力，给火花一点"重量"，纯匀速看起来像静止的线
 const DAMP: float = 5.5
 const GRAVITY: float = 340.0
+
+## 运行时上限。默认桌面值，Game 在触屏设备上会改成 MOBILE_MAX_PARTICLES。
+var max_particles: int = MAX_PARTICLES
 
 var _pos: PackedVector2Array = PackedVector2Array()
 var _vel: PackedVector2Array = PackedVector2Array()
@@ -29,7 +35,7 @@ func _ready() -> void:
 ## 在 [param at] 处炸开 count 颗火花，方向全随机（命中方向由武器决定，
 ## 但火花只是装饰，全向喷散在任何角度下都成立）。
 func burst(at: Vector2, tint: Color, count: int) -> void:
-	var free: int = MAX_PARTICLES - _pos.size()
+	var free: int = max_particles - _pos.size()
 	if free <= 0:
 		return
 	for i in range(mini(count, free)):

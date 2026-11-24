@@ -19,6 +19,10 @@ var enemies: Array[Enemy] = []
 @export var shot_color: Color = Color(1.0, 0.95, 0.6)
 ## >0 时命中后对周围再造成 60% 伤害（法师能量球）
 @export var splash_radius: float = 0.0
+## >0 时命中附加减速（射手箭矢的"钉住"）。减速圈 Enemy 自己会画出来，
+## 所以这是个玩家看得见的效果，不是暗改数值。
+@export var slow_time: float = 0.0
+@export var slow_factor: float = 0.0
 ## 战士没有远程武器，但节点仍然建出来并置 false，
 ## 避免卡池和升级逻辑里到处判空（那些代码大量引用本节的字段）
 @export var enabled: bool = true
@@ -49,18 +53,28 @@ func _update_fire(delta: float) -> void:
 	_fire_at(target.global_position)
 
 
-## 只锁射程内最近的敌人，扩大射程才有实际收益
+## 只锁射程内最近的敌人，扩大射程才有实际收益。
+## 但 Boss 在场时优先锁 Boss：Boss 慢、玩家一直在跑，它的位置通常在小怪后面，
+## 按"最近"锁定的话子弹会被一路的小怪全部吃掉，Boss 血条几乎不动
+## （实测同一只 Boss 的击杀时间从 14 秒飘到 49 秒，全看路上有多少小怪）。
 func _nearest_enemy() -> Enemy:
 	var best: Enemy = null
 	var best_dist: float = attack_range * attack_range
+	var boss: Enemy = null
+	var boss_dist: float = best_dist
 	for enemy in enemies:
 		if not is_instance_valid(enemy) or enemy.is_queued_for_deletion():
 			continue
 		var dist: float = global_position.distance_squared_to(enemy.global_position)
+		if enemy.kind == Enemy.Kind.BOSS:
+			if dist < boss_dist:
+				boss_dist = dist
+				boss = enemy
+			continue
 		if dist < best_dist:
 			best_dist = dist
 			best = enemy
-	return best
+	return boss if boss != null else best
 
 
 func _fire_at(target_pos: Vector2) -> void:
@@ -117,6 +131,8 @@ func _resolve_hit(shot: Dictionary, pos: Vector2, vel: Vector2) -> bool:
 		if _segment_distance(prev_pos, pos, enemy.global_position) > enemy.radius + HIT_RADIUS_PAD:
 			continue
 		enemy.take_damage(float(shot["damage"]))
+		if slow_time > 0.0:
+			enemy.apply_slow(slow_time, slow_factor)
 		hit_ids.append(enemy.get_instance_id())
 		if splash_radius > 0.0:
 			_splash_at(pos, hit_ids)

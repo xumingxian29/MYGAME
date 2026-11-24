@@ -91,6 +91,10 @@ func _ready() -> void:
 	add_child(camera_node)
 	camera_node.make_current()
 	camera = camera_node
+	# 玩家画在所有敌人之上。敌人是后加入 World 的，默认层级会盖住玩家——
+	# 被围住时自己的角色直接看不见，Boss 站到身上更是完全遮住。
+	# z_as_relative 保持默认，所以武器子节点也会跟着抬到同一层。
+	z_index = 1
 	queue_redraw()
 
 
@@ -107,12 +111,23 @@ func _configure_ranged_weapon() -> void:
 			bullet_weapon.shot_radius = 8.0
 			bullet_weapon.shot_color = Color(0.74, 0.52, 1.0)
 		HeroClass.RANGER:
-			bullet_weapon.damage = 8.0
-			bullet_weapon.interval = 0.22
+			bullet_weapon.damage = 10.0
+			bullet_weapon.interval = 0.20
 			bullet_weapon.projectile_speed = 980.0
 			bullet_weapon.attack_range = 470.0
 			bullet_weapon.shot_radius = 3.2
 			bullet_weapon.shot_color = Color(0.6, 1.0, 0.74)
+			# 穿透 3 而不是 1。射手原来只有单体 36 dps，而中后期刷怪速度是 5.2 只/秒，
+			# 清场速度永远追不上，人堆一满就被围死（探针：45 秒身边 0~1 只，85 秒 3~6 只，
+			# 一半以上伤害来自小怪接触）。射手的"范围"不该是一圈爆发，而是一箭串三只——
+			# 这样人越密收益越高，与"靠走位把敌人排成一条线"的玩法同向。
+			bullet_weapon.pierce = 3
+			# 箭矢"钉住"：命中后减速 0.55 秒。射手没有任何创造空间的手段
+			# （战士靠击退，法师靠 285 半径新星），只能靠拉开距离活命。
+			# 让每一箭都稍微拖慢追兵，走位的收益才是可累积的。
+			# 敌人身上会出现冰蓝外圈，玩家看得见自己"钉住"了谁。
+			bullet_weapon.slow_time = 0.55
+			bullet_weapon.slow_factor = 0.3
 		_:
 			bullet_weapon.enabled = false
 
@@ -232,6 +247,27 @@ func take_damage(amount: float) -> void:
 		died.emit()
 		return
 	add_trauma(0.55)
+
+
+## 圈外（毒）伤害：独立入口，不走 take_damage()。
+##
+## 两个理由，都是必须的：
+## 1. take_damage() 第一行是"无敌帧内直接返回"，而受击无敌 0.45 秒比毒伤 0.5 秒一跳还长。
+##    走那个入口的话，被怪贴身打的时候毒伤会被整段吞掉——越是危险的时刻反而越不掉毒血。
+## 2. 毒伤不该闪白、不该抖屏、不该给受击无敌。它该做的是"持续、可预期地扣血"，
+##    让玩家从血条和红边读出"我得进圈了"，而不是被一阵闪光干扰判断。
+##
+## 红边由 Game 侧的 hud.set_danger() 负责（血量下降自然变强），这里只改数值。
+func take_zone_damage(amount: float) -> void:
+	if health <= 0.0 or amount <= 0.0:
+		return
+	health = maxf(health - amount, 0.0)
+	health_changed.emit(health, max_health)
+	if health <= 0.0:
+		_trauma = 0.0
+		if camera != null:
+			camera.offset = Vector2.ZERO
+		died.emit()
 
 
 func heal(amount: float) -> void:
