@@ -6,6 +6,7 @@
 
     python serve.py            # 默认 http://127.0.0.1:8080
     python serve.py 9000       # 换端口
+    python serve.py 8080 --lan # 监听 0.0.0.0，同一 Wi-Fi 的手机可以打开
 
 Gzip 是必需的：index.wasm 未压缩约 38MB，压缩后约 10MB。
 压缩结果按 mtime 缓存在 build/web/.gzcache/，第二次启动不再重算。
@@ -14,12 +15,27 @@ Gzip 是必需的：index.wasm 未压缩约 38MB，压缩后约 10MB。
 import gzip
 import http.server
 import os
+import socket
 import socketserver
 import sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build", "web")
 CACHE = os.path.join(ROOT, ".gzcache")
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 8080
+# 默认只听本机：顺手开个端口不该让同网段的人都能扫到。要在手机上试玩再加 --lan。
+LAN = "--lan" in sys.argv
+
+
+def lan_ip() -> str:
+    """拿本机在局域网里的地址。连一个外网地址只是为了让系统选路由，不会真的发包。"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
 
 # 浏览器对 wasm 的 MIME 校验很严格，application/wasm 写错会直接拒绝实例化
 EXTRA_TYPES = {
@@ -115,8 +131,12 @@ if __name__ == "__main__":
     if not os.path.isdir(ROOT):
         sys.exit("找不到 %s，请先导出：\n"
                  '  godot --headless --path . --export-release "Web" build/web/index.html' % ROOT)
-    with Server(("127.0.0.1", PORT), Handler) as httpd:
+    host = "0.0.0.0" if LAN else "127.0.0.1"
+    with Server((host, PORT), Handler) as httpd:
         print("游戏地址： http://127.0.0.1:%d/" % PORT)
+        if LAN:
+            print("手机（同一 Wi-Fi）： http://%s:%d/" % (lan_ip(), PORT))
+            print("提示：Windows 防火墙可能拦截首次访问，弹窗要选「允许」")
         print("按 Ctrl+C 停止")
         try:
             httpd.serve_forever()
