@@ -1,0 +1,7 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# 本地验收残留（不属于游戏内容）
+.workbuddy/test_records_backup.cfg
+.workbuddy/verify.txt
