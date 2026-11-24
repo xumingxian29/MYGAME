@@ -15,7 +15,7 @@ import urllib.request
 import websocket
 
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-URL = "http://127.0.0.1:8080/"
+URL = os.environ.get("MV_URL", "http://127.0.0.1:8080/")
 PROFILE = os.path.join(os.environ["TEMP"], "edge-cdp-mygame-mobile")
 OUT = os.path.join("build")
 PORT = 9333
@@ -60,6 +60,9 @@ class CDP:
     def touch(self, kind, x, y, tid=0):
         points = [] if kind == "touchEnd" else [{"x": x, "y": y, "id": tid, "radiusX": 8, "radiusY": 8, "force": 1}]
         self.send("Input.dispatchTouchEvent", type=kind, touchPoints=points)
+
+
+LOAD_TIMEOUT = int(os.environ.get("MV_LOAD_TIMEOUT", "60"))
 
 
 def wait_for(cdp, expr, timeout=60, label=""):
@@ -132,7 +135,7 @@ window.addEventListener('unhandledrejection', e => window.__errs.push('REJ ' + e
 
     ok = wait_for(cdp, "(() => { const c = document.querySelector('canvas');"
                        " return c && c.width > 300 && window.__godotStarted === undefined ? c.width > 300 : c.width > 300; })()",
-                  timeout=90, label="canvas")
+                  timeout=LOAD_TIMEOUT, label="canvas")
     if not ok:
         cdp.shot(os.path.join(OUT, PREFIX + "_fail.png"))
         return 2

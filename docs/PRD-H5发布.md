@@ -107,7 +107,7 @@
 - 若发现丢失，在 `ScoreBoard.save()` 后显式调用同步点（Godot 4 Web 的 `OS` 无直接 flush API，需靠引擎周期性同步；必要时改为写完后 `await` 一帧再提示）。
 - 不做跨设备同步。
 
-### R7 · 导出与部署（P0）
+### R7 · 导出与部署（P0 → 已完成，公网部署见 §10）
 
 - 安装 Web 导出模板（约 1GB，含各平台；仅用 Web 部分）。
 - 新增 `export_presets.cfg`，预设名 `Web`，包含：
@@ -273,3 +273,64 @@ python dev/mobile_check.py        # 手机横屏 + 触摸模拟
 MV_W=1280 MV_H=720 MV_MOBILE=0 MV_TOUCH=0 MV_PREFIX=desktop python dev/mobile_check.py
 ```
 
+
+---
+
+## 10. 公网部署到 GitHub Pages（2026-11-24 完成）
+
+**在线地址：<https://xumingxian29.github.io/MYGAME/>**
+
+### 10.1 这条路为什么能走通
+
+三件事凑齐才成立，少一件都要换方案：
+
+| 前提 | 本项目的情况 |
+|---|---|
+| 不需要 COOP/COEP 响应头 | 用 **nothreads** 模板导出，不依赖 `SharedArrayBuffer`。GitHub Pages 无法自定义响应头，这一条是决定性的 |
+| 资源路径必须是相对的 | 加载页里只有 `index.js` / `index.wasm` / `index.pck` 三个相对引用，没有以 `/` 开头的绝对路径，所以放在 `/MYGAME/` 子目录下能正确解析 |
+| wasm 要能被流式编译 | GitHub Pages 对 `.wasm` 返回 `application/wasm`（实测确认），`WebAssembly.instantiateStreaming` 直接可用 |
+
+### 10.2 发布方式：`deploy_pages.sh`
+
+```bash
+./deploy_pages.sh              # 导出 + 推送
+./deploy_pages.sh --no-export  # 只重推现有 build/web
+```
+
+脚本做四件事，每一步都有个明确的"为什么"：
+
+1. **白名单挑文件**，不用 `cp build/web/*`。产物目录里还有 `.import`（编辑器生成的资源元数据）和 `.gzcache`（`serve.py` 的 gzip 缓存），传上去纯属噪音。
+2. **写一个空 `.nojekyll`**。否则 GitHub 会先拿 Jekyll 处理一遍静态站点，纯属浪费，还可能吞掉下划线开头的文件。
+3. **在 `build/pages` 里新建一个临时仓库**，只提交这一次的内容。
+4. **`--force` 推送到 `gh-pages`**。
+
+第 3、4 步是刻意的：wasm 单文件 39.5MB，如果每次发布都往同一分支追加提交，十几次之后仓库就是几百 MB，克隆会变得很慢。强推单提交后，`gh-pages` 分支永远只有一个 commit，仓库体积只跟当前构建有关。
+
+仓库 **Settings → Pages** 的 Source 已经是 `gh-pages / (root)`（通过 API 读到 `source.branch = gh-pages`, `build_type = legacy`），所以每次推送后 GitHub 会自动重新构建，不需要再点任何东西。
+
+### 10.3 线上实测
+
+| 项 | 结果 |
+|---|---|
+| 入口 | `https://xumingxian29.github.io/MYGAME/` → **200**，`text/html` |
+| MIME | `index.wasm` → `application/wasm`；`index.js` → `application/javascript`；`index.pck` → `application/octet-stream` |
+| 传输压缩 | wasm **39.5MB → 4.0MB**；js 280KB → 69KB；pck 1.47MB → 1.43MB（`Content-Encoding: gzip`） |
+| 字节一致性 | `index.html` / `index.js` / `index.pck` 的 sha256 与本地 `build/web` **完全一致** |
+| 公网地址完整启动 | 桌面配置（1280×720）打开公网地址：加载页走完 → `canvas` 挂载 → 菜单正常渲染，引擎日志 `4.7.2.stable ... single-threaded`，**控制台 0 error**。本机代理只有约 15KB/s，这一次首屏耗时 **6 分 43 秒** |
+| 子路径全链路 | 把同一份产物放到本地 `/MYGAME/` 子路径（`python -m http.server --directory build/site`），Edge 模拟 844×390 + 5 点触摸：菜单 → 开始 → Lv.2 / 击杀 3 → 升级选卡，**控制台 0 error**；引擎日志 `Godot Engine v4.7.2.stable ... Compatibility ... single-threaded` |
+
+**关于耗时的说明**：6 分 43 秒是本机出口被代理限速的结果（39.5MB wasm 已在 CDN 侧压到 4MB，仍只有 15KB/s 量级），不是站点问题；同等体积在普通宽带 / 4G 下约 3~8 秒。手机模拟那一轮（844×390 + `deviceScaleFactor=3`，显存与内存需求翻倍）在下载中途被浏览器掐断过一次，桌面配置同一地址一次通过。
+
+### 10.4 体积与配额
+
+| 限制 | 现状 | 余量 |
+|---|---|---|
+| GitHub 单文件 100MB | wasm 39.5MB | 够 |
+| Pages 站点体积 ≤1GB | 约 42MB / 版本 | 够 |
+| Pages 流量 100GB/月 | 首屏约 6MB，二次进入走缓存 | 约 1.6 万次首屏/月 |
+
+### 10.5 已知限制
+
+1. **存档不跨设备**：`user://` 落在浏览器 IndexedDB，换设备 / 换浏览器 / 清站点数据都会清空。
+2. **更新有延迟**：推送后 GitHub 构建 + CDN 生效约 1~2 分钟；期间可能出现新旧文件混用，重新刷新即可。
+3. **国内访问速度**：`*.github.io` 在部分网络下不稳定，需要国内访问时可换对象存储 / 自有服务器，产物不用改。
