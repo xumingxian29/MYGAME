@@ -43,7 +43,9 @@ FILES=(
 	index.audio.position.worklet.js
 )
 
-rm -rf "$TMP"
+# 不 wipe 这个目录：里面 40MB 的 wasm 变了之后要重传，而"删掉重建"既会触发
+# 本机的批量删除保护（>50 个文件就拦），又会让 git 认不出哪些文件没变。
+# 目录里只有白名单这 10 个文件 + .nojekyll + .git，原地覆盖就是最省事的做法。
 mkdir -p "$TMP"
 for f in "${FILES[@]}"; do
 	[ -f "$OUT/$f" ] || { echo "缺少 $OUT/$f，导出可能失败" >&2; exit 1; }
@@ -56,8 +58,32 @@ cd "$TMP"
 git init -q -b "$BRANCH"
 git config user.name "deploy-bot"
 git config user.email "deploy@local"
-git add -A
-git commit -q -m "deploy: $(date '+%Y-%m-%d %H:%M')"
+
+# 先接上远端已有的一次提交，让 git 在推送时**跳过已存在的对象**。
+# 不这么做的话每次强推都是一个全新的根提交，40MB 的 wasm 要从本机重传一遍——
+# 这台机器出口只有十几 KB/s，一次就是半个多小时。接上之后通常只有 .pck
+# （几 MB，而 wasm 不变）需要上传。
+echo "==> 接上远端已有的 $BRANCH"
+if git -c http.sslBackend=openssl -c http.sslVerify=false \
+	fetch -q --depth=1 "$REMOTE_URL" "$BRANCH" 2>/dev/null; then
+	git reset -q --soft FETCH_HEAD
+	echo "  已复用远端历史"
+else
+	echo "  远端不可达或分支为空，按全新提交推送"
+fi
+
+# 只暂存白名单：这个目录是原地复用的，里面可能残留 .import / 子目录之类
+# 的本地垃圾，`git add -A` 会把它们一起发到线上。
+git rm -r -q --cached . >/dev/null 2>&1 || true
+for f in "${FILES[@]}" .nojekyll; do
+	git add -f "$f"
+done
+
+if git diff --cached --quiet; then
+	echo "==> 内容与线上完全一致，跳过提交"
+else
+	git commit -q -m "deploy: $(date '+%Y-%m-%d %H:%M')"
+fi
 
 echo "==> 推送 $BRANCH"
 git -c http.sslBackend=openssl -c http.sslVerify=false \
