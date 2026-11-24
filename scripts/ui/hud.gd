@@ -20,6 +20,18 @@ var _danger: float = 0.0
 var _danger_t: float = 0.0
 var _hp_bar: ProgressBar
 var _xp_bar: ProgressBar
+var _mp_bar: ProgressBar
+var _hp_text: Label
+var _xp_text: Label
+var _mp_text: Label
+var _hp_gauge: Control
+var _xp_gauge: Control
+var _mp_gauge: Control
+## 当前职业与蓝量缓存：蓝条文字要显示"空格 · 技能名"，且只在数值变化时重建字符串
+var _hero: int = HeroClass.WARRIOR
+var _mp_current: float = 0.0
+var _mp_max: float = HeroClass.MANA_MAX
+var _mp_ready: bool = false
 var _stats_label: Label
 var _next_label: Label
 var _name_label: Label
@@ -63,10 +75,23 @@ func _build() -> void:
 	corner.add_theme_constant_override("separation", 6)
 	_root.add_child(corner)
 
-	_hp_bar = _make_bar(Color(0.9, 0.28, 0.32), Vector2(260, 14))
-	_xp_bar = _make_bar(Color(0.38, 0.74, 1.0), Vector2(260, 8))
-	corner.add_child(_hp_bar)
-	corner.add_child(_xp_bar)
+	# 三条状态条：血 / 经验 / 蓝。每条都是"进度条 + 居中数值"，
+	# 数值叠在条上而不是另起一行，省纵向空间，也不会让眼睛在两处之间来回跑。
+	_hp_gauge = _make_gauge("HpGauge", Color(0.9, 0.28, 0.32), Vector2(260, 18), 12)
+	_hp_bar = _hp_gauge.get_node("Bar") as ProgressBar
+	_hp_text = _hp_gauge.get_node("Text") as Label
+	corner.add_child(_hp_gauge)
+
+	_xp_gauge = _make_gauge("XpGauge", Color(0.38, 0.74, 1.0), Vector2(260, 14), 10)
+	_xp_bar = _xp_gauge.get_node("Bar") as ProgressBar
+	_xp_text = _xp_gauge.get_node("Text") as Label
+	corner.add_child(_xp_gauge)
+
+	_mp_gauge = _make_gauge("MpGauge", Color(0.34, 0.56, 1.0), Vector2(260, 16), 12)
+	_mp_bar = _mp_gauge.get_node("Bar") as ProgressBar
+	_mp_text = _mp_gauge.get_node("Text") as Label
+	corner.add_child(_mp_gauge)
+
 	_stats_label = _make_label("", 16, Color(0.82, 0.88, 0.98))
 	corner.add_child(_stats_label)
 	# 卡越到后期间隔越长，必须让玩家看得见"下一张卡在哪一级"
@@ -118,13 +143,61 @@ func _build() -> void:
 func set_health(current: float, maximum: float) -> void:
 	if _hp_bar == null:
 		return
-	_hp_bar.max_value = maximum
+	_hp_bar.max_value = maxf(maximum, 1.0)
 	_hp_bar.value = current
+	_set_text(_hp_text, "%d / %d" % [roundi(maxf(current, 0.0)), roundi(maximum)])
 
 
 func set_progress(value: float, need: float) -> void:
+	if _xp_bar == null:
+		return
 	_xp_bar.max_value = maxf(need, 1.0)
 	_xp_bar.value = value
+	_set_text(_xp_text, "%d / %d" % [roundi(maxf(value, 0.0)), roundi(need)])
+
+
+## 蓝条。满了把条和文字都切成金色，并直接写"空格 · 技能名"，
+## 玩家不用记满蓝该按什么键。
+func set_mana(current: float, maximum: float) -> void:
+	if _mp_bar == null:
+		return
+	_mp_current = current
+	_mp_max = maxf(maximum, 1.0)
+	_mp_bar.max_value = _mp_max
+	_mp_bar.value = current
+
+	var ready: bool = current >= _mp_max - 0.01
+	if ready != _mp_ready:
+		_mp_ready = ready
+		var fill_color: Color = Color(1.0, 0.85, 0.42) if ready else Color(0.34, 0.56, 1.0)
+		_mp_bar.add_theme_stylebox_override("fill", UiKit.flat(fill_color, Color.TRANSPARENT, 4, 0))
+	_refresh_mana_text()
+
+
+func set_hero(hero: int) -> void:
+	_hero = clampi(hero, 0, HeroClass.COUNT - 1)
+	_mp_ready = false
+	_mp_bar.add_theme_stylebox_override("fill", UiKit.flat(Color(0.34, 0.56, 1.0), Color.TRANSPARENT, 4, 0))
+	_refresh_mana_text()
+
+
+func _refresh_mana_text() -> void:
+	if _mp_text == null:
+		return
+	if _mp_ready:
+		_set_text(_mp_text, "空格 · %s" % HeroClass.skill_name(_hero))
+		# 满蓝时条是金色，文字必须反过来用深色，否则金底金字看不出写了什么
+		_mp_text.add_theme_color_override("font_color", Color(0.13, 0.1, 0.04))
+	else:
+		_set_text(_mp_text, "%d / %d" % [roundi(_mp_current), roundi(_mp_max)])
+		_mp_text.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0, 0.92))
+
+
+## 只在内容真的变化时才赋值：Label.text 的 setter 会触发重新排版，
+## 每帧无条件写一次在 60fps 下等于每帧重排三次文本。
+func _set_text(label: Label, text: String) -> void:
+	if label != null and label.text != text:
+		label.text = text
 
 
 func set_stats(text: String) -> void:
@@ -140,7 +213,7 @@ func set_next_upgrade(next_level: int) -> void:
 func set_score(player_name: String, current: int, best: int) -> void:
 	if _name_label == null:
 		return
-	_name_label.text = player_name
+	_name_label.text = "%s · %s" % [player_name, HeroClass.NAMES[_hero]] if player_name != "" else ""
 	_score_label.text = "分数 %d" % current
 	_best_label.text = "个人最高 %d" % best
 
@@ -444,6 +517,30 @@ func _card_style(bg: Color, border: Color, width: int) -> StyleBoxFlat:
 
 func _make_label(text: String, size: int, color: Color) -> Label:
 	return UiKit.label(text, size, color)
+
+
+## 进度条 + 叠在上面的数值。返回的 Control 尺寸固定，条与文字都铺满它，
+## 因此不需要任何手动对齐；子节点用名字取回（Bar / Text）。
+func _make_gauge(node_name: String, fill: Color, size: Vector2, font_size: int) -> Control:
+	var holder := Control.new()
+	holder.name = node_name
+	holder.custom_minimum_size = size
+	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var bar := _make_bar(fill, size)
+	bar.name = "Bar"
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	holder.add_child(bar)
+	bar.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+
+	var text := UiKit.label("", font_size, Color(1.0, 1.0, 1.0, 0.95))
+	text.name = "Text"
+	text.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	holder.add_child(text)
+	text.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	text.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	return holder
 
 
 func _make_bar(fill_color: Color, bar_size: Vector2) -> ProgressBar:

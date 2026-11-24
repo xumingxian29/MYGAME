@@ -6,7 +6,10 @@ extends Node2D
 ## enemies 数组由 Game 注入（同一引用），并转发给各武器。
 
 signal health_changed(current: float, maximum: float)
+signal mana_changed(current: float, maximum: float)
 signal died
+## 技能释放成功时发出，HUD 用来做一次性提示（目前只用来震一下技能文字）
+signal skill_cast(hero: int)
 
 ## 相机缩放。Game 的刷怪距离按“刚好在视野外”计算，改动此处需同步刷怪距离。
 const CAMERA_ZOOM: float = 1.35
@@ -14,6 +17,8 @@ const INVULN_TIME: float = 0.45
 const BODY_RADIUS: float = 14.0
 const FLASH_TIME: float = 0.18
 const FLASH_COLOR: Color = Color(2.2, 1.2, 1.2)
+## 技能特效（扩散圆环）的持续时间
+const SKILL_FX_TIME: float = 0.45
 
 ## 屏幕震动用 trauma 模型：伤害累加 trauma，随时间线性衰减，位移取 trauma² 作幅度。
 ## 平方的意义是"轻击几乎不抖、重击抖得明显"，比直接用线性强度更像有重量。
@@ -22,6 +27,12 @@ const TRAUMA_DECAY: float = 1.7
 ## 打在 853 宽的世界视野里刚好"看得见但不晕"，再大就开始影响读屏了。
 const SHAKE_MAX_OFFSET: float = 26.0
 
+## 职业：决定血量 / 速度 / 武器 / 主动技能。必须在 add_child 之前赋值，
+## 因为 _ready 里要按职业装配武器节点。
+var hero: int = HeroClass.WARRIOR
+var mana: float = 0.0
+var max_mana: float = HeroClass.MANA_MAX
+
 var max_health: float = 120.0
 var health: float = 120.0
 var move_speed: float = 240.0
@@ -29,6 +40,7 @@ var move_speed: float = 240.0
 var enemies: Array[Enemy] = []
 
 var bullet_weapon: BulletWeapon
+var melee_weapon: MeleeWeapon
 var orbit_weapon: OrbitWeapon
 var boomerang_weapon: BoomerangWeapon
 ## 相机由玩家持有，震动直接改 offset，不需要额外的抖动节点
@@ -41,14 +53,29 @@ var _flash_t: float = 0.0
 ## 当前震动强度 0~1，以及正弦相位（累加而不是取时间，避免暂停后跳变）
 var _trauma: float = 0.0
 var _shake_t: float = 0.0
+## 技能扩散圆环：半径与颜色由 HeroSkill 写入，这里只负责画
+var _skill_fx_t: float = 0.0
+var _skill_fx_radius: float = 0.0
+var _skill_fx_color: Color = Color.WHITE
 
 
 func _ready() -> void:
+	hero = clampi(hero, 0, HeroClass.COUNT - 1)
+	max_health = HeroClass.HEALTH[hero]
 	health = max_health
+	move_speed = HeroClass.SPEED[hero]
+	max_mana = HeroClass.MANA_MAX
+	mana = 0.0
 
 	bullet_weapon = BulletWeapon.new()
 	bullet_weapon.enemies = enemies
+	_configure_ranged_weapon()
 	add_child(bullet_weapon)
+
+	if hero == HeroClass.WARRIOR:
+		melee_weapon = MeleeWeapon.new()
+		melee_weapon.enemies = enemies
+		add_child(melee_weapon)
 
 	orbit_weapon = OrbitWeapon.new()
 	orbit_weapon.enemies = enemies
@@ -67,11 +94,89 @@ func _ready() -> void:
 	queue_redraw()
 
 
+## 远程武器的职业参数。战士没有远程，但仍保留节点并 enabled=false——
+## 卡池、升级、结算里大量直接读 bullet_weapon 的字段，置空会到处判空。
+func _configure_ranged_weapon() -> void:
+	match hero:
+		HeroClass.MAGE:
+			bullet_weapon.damage = 34.0
+			bullet_weapon.interval = 1.0
+			bullet_weapon.projectile_speed = 430.0
+			bullet_weapon.attack_range = 400.0
+			bullet_weapon.splash_radius = 52.0
+			bullet_weapon.shot_radius = 8.0
+			bullet_weapon.shot_color = Color(0.74, 0.52, 1.0)
+		HeroClass.RANGER:
+			bullet_weapon.damage = 8.0
+			bullet_weapon.interval = 0.22
+			bullet_weapon.projectile_speed = 980.0
+			bullet_weapon.attack_range = 470.0
+			bullet_weapon.shot_radius = 3.2
+			bullet_weapon.shot_color = Color(0.6, 1.0, 0.74)
+		_:
+			bullet_weapon.enabled = false
+
+
 func _physics_process(delta: float) -> void:
 	_invuln = maxf(_invuln - delta, 0.0)
 	_tick_flash(delta)
 	_tick_shake(delta)
+	_tick_mana(delta)
+	_tick_skill_fx(delta)
 	_move(delta)
+
+
+## 自然回蓝。只在整数变化时才发信号：每帧发信号会让 HUD 每帧重建一次字符串，
+## 而条状进度用 1 点精度看起来已经足够连续。
+func _tick_mana(delta: float) -> void:
+	if mana >= max_mana:
+		return
+	var before: int = int(mana)
+	mana = minf(mana + HeroClass.MANA_REGEN[hero] * delta, max_mana)
+	if int(mana) != before or mana >= max_mana:
+		mana_changed.emit(mana, max_mana)
+
+
+## 击杀回蓝，由 Game 调用
+func add_mana(amount: float) -> void:
+	if mana >= max_mana or amount <= 0.0:
+		return
+	mana = minf(mana + amount, max_mana)
+	mana_changed.emit(mana, max_mana)
+
+
+func is_skill_ready() -> bool:
+	return mana >= max_mana - 0.01
+
+
+## 满蓝才能放，放完清零。返回是否真的放出去了，方便 Game 给音效 / 提示。
+func try_use_skill() -> bool:
+	if health <= 0.0 or not is_skill_ready():
+		return false
+	mana = 0.0
+	mana_changed.emit(mana, max_mana)
+	HeroSkill.cast(hero, self, enemies)
+	skill_cast.emit(hero)
+	return true
+
+
+## 技能给的临时无敌：取最大值而不是覆盖，避免短无敌把长无敌顶掉
+func grant_invuln(duration: float) -> void:
+	_invuln = maxf(_invuln, duration)
+
+
+func spawn_skill_fx(radius: float, color: Color) -> void:
+	_skill_fx_radius = radius
+	_skill_fx_color = color
+	_skill_fx_t = SKILL_FX_TIME
+	queue_redraw()
+
+
+func _tick_skill_fx(delta: float) -> void:
+	if _skill_fx_t <= 0.0:
+		return
+	_skill_fx_t = maxf(_skill_fx_t - delta, 0.0)
+	queue_redraw()
 
 
 ## 由外部（受伤、击杀、死亡）累加。1.0 是满强度，多余部分直接夹掉，
@@ -151,6 +256,16 @@ func _tick_flash(delta: float) -> void:
 
 
 func _draw() -> void:
-	draw_circle(Vector2.ZERO, BODY_RADIUS, Color(0.42, 0.83, 1.0))
-	draw_arc(Vector2.ZERO, BODY_RADIUS, 0.0, TAU, 24, Color(0.9, 0.98, 1.0), 2.0, true)
-	draw_circle(Vector2.ZERO, BODY_RADIUS * 0.45, Color(0.1, 0.28, 0.4))
+	var tint: Color = HeroClass.color(hero)
+	draw_circle(Vector2.ZERO, BODY_RADIUS, tint)
+	draw_arc(Vector2.ZERO, BODY_RADIUS, 0.0, TAU, 24, tint.lightened(0.55), 2.0, true)
+	draw_circle(Vector2.ZERO, BODY_RADIUS * 0.45, tint.darkened(0.68))
+
+	if _skill_fx_t > 0.0:
+		var progress: float = 1.0 - _skill_fx_t / SKILL_FX_TIME
+		var radius: float = _skill_fx_radius * (0.35 + 0.65 * progress)
+		var alpha: float = 1.0 - progress
+		# 只画一圈扩散的环，不填整片颜色：填满会盖住脚下的敌人和掉落物，
+		# 技能放完的那一秒恰好是最需要看清战场的时刻。
+		draw_arc(Vector2.ZERO, radius, 0.0, TAU, 48,
+			Color(_skill_fx_color.r, _skill_fx_color.g, _skill_fx_color.b, alpha * 0.9), 3.5, true)

@@ -53,7 +53,7 @@ const FIRST_CARD_LEVEL: int = 2
 
 ## 升级卡数据表。unit：flat 固定值 / pct 百分比 / count 整数层数 / unlock 解锁
 const CARDS: Array[Dictionary] = [
-	{"id": "bullet_damage", "icon": "伤", "name": "弹药强化", "desc": "子弹伤害", "unit": "flat", "amount": 6.0},
+	{"id": "bullet_damage", "icon": "伤", "name": "弹药强化", "desc": "子弹伤害", "unit": "pct", "amount": 0.22},
 	{"id": "bullet_rate", "icon": "速", "name": "快速装填", "desc": "攻击速度", "unit": "pct", "amount": 0.12},
 	{"id": "bullet_proj", "icon": "弹", "name": "散射", "desc": "额外弹丸", "unit": "count", "amount": 1.0},
 	{"id": "bullet_pierce", "icon": "穿", "name": "穿甲", "desc": "穿透", "unit": "count", "amount": 1.0},
@@ -69,7 +69,10 @@ const CARDS: Array[Dictionary] = [
 	{"id": "boomerang_range", "icon": "远", "name": "远掷", "desc": "投掷距离", "unit": "flat", "amount": 45.0},
 	{"id": "boomerang_rate", "icon": "疾", "name": "连掷", "desc": "投掷频率", "unit": "pct", "amount": 0.12},
 	{"id": "move", "icon": "行", "name": "轻身", "desc": "移动速度", "unit": "pct", "amount": 0.08},
-	{"id": "hp", "icon": "命", "name": "强健体魄", "desc": "生命上限", "unit": "flat", "amount": 25.0},
+	{"id": "hp", "icon": "命", "name": "强健体魄", "desc": "生命上限", "unit": "pct", "amount": 0.18},
+	{"id": "melee_damage", "icon": "斩", "name": "重斩", "desc": "近战伤害", "unit": "pct", "amount": 0.2},
+	{"id": "melee_rate", "icon": "快", "name": "疾斩", "desc": "挥砍速度", "unit": "pct", "amount": 0.14},
+	{"id": "melee_reach", "icon": "延", "name": "长刃", "desc": "近战范围", "unit": "flat", "amount": 18.0},
 ]
 
 var player: Player
@@ -104,6 +107,9 @@ var _card_gap: int = 1
 var _choices: Array[Dictionary] = []
 ## 当前玩家的档案 {"name", "best", "runs", "total_kills"}，由 ScoreBoard 读写
 var _profile: Dictionary = {}
+## 本局职业，以及菜单里上次选的职业（换人时沿用，不用每次重选）
+var _hero: int = HeroClass.WARRIOR
+var _last_hero: int = HeroClass.WARRIOR
 
 
 func _ready() -> void:
@@ -138,10 +144,12 @@ func _open_menu() -> void:
 	hud.clear_overlays()
 	hud.set_danger(0.0)
 	hud.set_hud_visible(false)
-	start_menu.open(ScoreBoard.last_player(), ScoreBoard.list_players())
+	start_menu.open(ScoreBoard.last_player(), ScoreBoard.list_players(), _last_hero)
 
 
-func _on_menu_started(player_name: String) -> void:
+func _on_menu_started(player_name: String, hero: int) -> void:
+	_hero = clampi(hero, 0, HeroClass.COUNT - 1)
+	_last_hero = _hero
 	_profile = ScoreBoard.load_profile(player_name)
 	start_menu.close()
 	_begin_run()
@@ -186,11 +194,16 @@ func _clear_world() -> void:
 
 func _spawn_player() -> void:
 	player = Player.new()
+	# hero 必须在 add_child 之前赋值：Player._ready 里要按职业装配武器
+	player.hero = _hero
 	player.enemies = _enemies
 	world.add_child(player)
 	player.health_changed.connect(hud.set_health)
+	player.mana_changed.connect(hud.set_mana)
 	player.died.connect(_on_player_died)
+	hud.set_hero(_hero)
 	hud.set_health(player.health, player.max_health)
+	hud.set_mana(player.mana, player.max_mana)
 
 
 func _physics_process(delta: float) -> void:
@@ -346,6 +359,8 @@ func _on_enemy_died(enemy: Enemy, xp: int) -> void:
 	# 普通击杀几乎无感（靠连杀累积出"战场在动"），精英击杀单独给一记明显的顿挫
 	if is_instance_valid(player):
 		player.add_trauma(0.25 if enemy.tier > 0 else 0.04)
+		# 击杀是回蓝的主要来源，自然回蓝只是保底
+		player.add_mana(HeroClass.MANA_PER_KILL[_hero])
 	_spawn_gem(enemy.global_position, xp)
 
 
@@ -416,9 +431,15 @@ func _open_level_up() -> void:
 func _eligible_cards() -> Array[Dictionary]:
 	var orbit_unlocked: bool = player.orbit_weapon.blades > 0
 	var boomerang_unlocked: bool = player.boomerang_weapon.count > 0
+	# 战士只有近战，远程卡对他来说等于空卡；法师/射手反过来
+	var melee: bool = _hero == HeroClass.WARRIOR
 	var pool: Array[Dictionary] = []
 	for card in CARDS:
 		var id: String = card["id"]
+		if id.begins_with("melee") and not melee:
+			continue
+		if id.begins_with("bullet") and melee:
+			continue
 		if id == "orbit_unlock":
 			if not orbit_unlocked:
 				pool.append(card)
@@ -446,6 +467,7 @@ func _eligible_cards() -> Array[Dictionary]:
 ## 存活 155s ~ 497s，手感忽难忽易的原因主要在这里，而不是整体数值偏高。
 const OUTPUT_IDS: Array[String] = [
 	"bullet_damage", "bullet_rate", "bullet_proj", "bullet_pierce",
+	"melee_damage", "melee_rate", "melee_reach",
 	"orbit_damage", "boomerang_damage",
 ]
 
@@ -542,7 +564,7 @@ func _apply_upgrade(card: Dictionary) -> void:
 	var boomerang: BoomerangWeapon = player.boomerang_weapon
 	match id:
 		"bullet_damage":
-			bullet.damage += amount
+			bullet.damage *= (1.0 + amount)
 		"bullet_rate":
 			bullet.interval = maxf(bullet.interval * (1.0 - amount), 0.1)
 		"bullet_proj":
@@ -575,8 +597,19 @@ func _apply_upgrade(card: Dictionary) -> void:
 		"move":
 			player.move_speed *= (1.0 + amount)
 		"hp":
-			player.max_health += amount
-			player.heal(amount)
+			# 生命也按百分比：战士 180 与法师 100 吃同样的 +25 差距太大
+			var bonus: float = player.max_health * amount
+			player.max_health += bonus
+			player.heal(bonus)
+		"melee_damage":
+			if player.melee_weapon != null:
+				player.melee_weapon.damage *= (1.0 + amount)
+		"melee_rate":
+			if player.melee_weapon != null:
+				player.melee_weapon.interval = maxf(player.melee_weapon.interval * (1.0 - amount), 0.12)
+		"melee_reach":
+			if player.melee_weapon != null:
+				player.melee_weapon.reach += amount
 
 
 # ---------------------------------------------------------------- 结束与输入
@@ -619,6 +652,9 @@ func _input(event: InputEvent) -> void:
 		return
 
 	match _state:
+		State.PLAYING:
+			if key_event.is_action_pressed("cast_skill") and is_instance_valid(player):
+				player.try_use_skill()
 		State.LEVEL_UP:
 			if key_event.keycode >= KEY_1 and key_event.keycode <= KEY_9:
 				_choose(key_event.keycode - KEY_1)
@@ -643,7 +679,7 @@ func _time_text() -> String:
 
 func _update_hud() -> void:
 	hud.set_progress(float(_xp), float(_xp_need))
-	hud.set_stats("Lv.%d    击杀 %d    时间 %s" % [_level, _kills, _time_text()])
+	hud.set_stats("%s  Lv.%d    击杀 %d    时间 %s" % [HeroClass.NAMES[_hero], _level, _kills, _time_text()])
 	hud.set_next_upgrade(_next_card_level)
 	hud.set_danger(_danger_level())
 	var best_score: int = 0

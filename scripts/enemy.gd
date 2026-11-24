@@ -39,6 +39,9 @@ var _dead: bool = false
 ## 闪白剩余时长。用倒数计时而不是 Tween：高密度下每秒会有上千次受击，
 ## create_tween() 会持续分配对象，而且同一敌人连续受击时多个 Tween 会互抢 modulate。
 var _flash_t: float = 0.0
+## 减速剩余时长与强度（法师新星、战士击退后的迟滞）
+var _slow_t: float = 0.0
+var _slow_factor: float = 0.0
 
 
 ## 在 add_child 之前调用，一次配置好本敌人的属性。
@@ -70,11 +73,13 @@ func _ready() -> void:
 
 func _physics_process(delta: float) -> void:
 	_tick_flash(delta)
+	_tick_slow(delta)
 	if _dead or not is_instance_valid(target):
 		return
 
 	_touch_cd = maxf(_touch_cd - delta, 0.0)
 
+	var speed: float = _speed * (1.0 - _slow_factor) if _slow_t > 0.0 else _speed
 	var to_target: Vector2 = target.global_position - global_position
 	var dist: float = to_target.length()
 	if dist > 0.001:
@@ -84,7 +89,7 @@ func _physics_process(delta: float) -> void:
 		# 分离力只改方向不改速度：总长度封顶 1，所以被挤住时会自然减速，
 		# 而不是从邻居身上穿过去
 		var steer: Vector2 = (dir + separation * SEPARATION_WEIGHT).limit_length(1.0)
-		global_position += steer * _speed * delta
+		global_position += steer * speed * delta
 
 	if dist <= radius + 16.0 and _touch_cd <= 0.0:
 		if target.has_method("take_damage"):
@@ -111,6 +116,24 @@ func _flash() -> void:
 	_flash_t = FLASH_TIME
 
 
+## 减速可以叠加取最强值，不刷新更弱的减速：连续吃两发新星不会互相覆盖变慢
+func apply_slow(duration: float, factor: float) -> void:
+	if duration <= 0.0 or factor <= 0.0:
+		return
+	_slow_t = maxf(_slow_t, duration)
+	_slow_factor = maxf(_slow_factor, factor)
+	queue_redraw()
+
+
+func _tick_slow(delta: float) -> void:
+	if _slow_t <= 0.0:
+		return
+	_slow_t = maxf(_slow_t - delta, 0.0)
+	if _slow_t <= 0.0:
+		_slow_factor = 0.0
+		queue_redraw()
+
+
 ## 闪白衰减：亮到白是线性回落，比 Tween 少一次对象分配，也不会被后一次受击打断
 func _tick_flash(delta: float) -> void:
 	if _flash_t <= 0.0:
@@ -126,6 +149,9 @@ func _draw() -> void:
 	draw_circle(Vector2.ZERO, radius, _color)
 	draw_arc(Vector2.ZERO, radius, 0.0, TAU, 20, _color.darkened(0.45), 2.0, true)
 	draw_circle(Vector2.ZERO, radius * 0.35, _color.darkened(0.55))
+	# 减速标记：外圈一道冰蓝色，让玩家能看出"哪几只被冻住了"
+	if _slow_t > 0.0:
+		draw_arc(Vector2.ZERO, radius + 4.0, 0.0, TAU, 18, Color(0.55, 0.82, 1.0, 0.8), 2.0, true)
 
 	if _health < max_health and _health > 0.0:
 		var width: float = radius * 2.0

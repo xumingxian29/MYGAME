@@ -14,6 +14,16 @@ var enemies: Array[Enemy] = []
 @export var projectiles_per_shot: int = 1
 @export var pierce: int = 1
 
+## 职业差异化的表现层：法师的能量球更大更紫，射手的箭矢细而绿
+@export var shot_radius: float = 4.5
+@export var shot_color: Color = Color(1.0, 0.95, 0.6)
+## >0 时命中后对周围再造成 60% 伤害（法师能量球）
+@export var splash_radius: float = 0.0
+## 战士没有远程武器，但节点仍然建出来并置 false，
+## 避免卡池和升级逻辑里到处判空（那些代码大量引用本节的字段）
+@export var enabled: bool = true
+
+const SPLASH_FACTOR: float = 0.6
 const SHOT_LIFETIME: float = 1.4
 const HIT_RADIUS_PAD: float = 4.0
 
@@ -22,6 +32,8 @@ var _shots: Array[Dictionary] = []
 
 
 func _physics_process(delta: float) -> void:
+	if not enabled:
+		return
 	_update_fire(delta)
 	_update_shots(delta)
 
@@ -106,10 +118,43 @@ func _resolve_hit(shot: Dictionary, pos: Vector2, vel: Vector2) -> bool:
 			continue
 		enemy.take_damage(float(shot["damage"]))
 		hit_ids.append(enemy.get_instance_id())
+		if splash_radius > 0.0:
+			_splash_at(pos, hit_ids)
 		if int(shot["pierce"]) <= 1:
 			return true
 		shot["pierce"] = int(shot["pierce"]) - 1
 	return false
+
+
+## 命中点溅射：只打"这一发还没打过的"敌人，避免同一发子弹对同一目标算两次伤害
+func _splash_at(at: Vector2, hit_ids: Array) -> void:
+	var splash_damage: float = damage * SPLASH_FACTOR
+	for enemy in enemies:
+		if not is_instance_valid(enemy) or enemy.is_queued_for_deletion():
+			continue
+		if hit_ids.has(enemy.get_instance_id()):
+			continue
+		if enemy.global_position.distance_to(at) > splash_radius + enemy.radius:
+			continue
+		enemy.take_damage(splash_damage)
+		hit_ids.append(enemy.get_instance_id())
+
+
+## 射手技能的齐射：以自身为圆心均匀铺开，不索敌。
+## 复用同一套弹道与命中判定，规则和普攻完全一致。
+func fire_ring(count: int, damage_scale: float, pierce_override: int) -> void:
+	var shots: int = maxi(count, 1)
+	var start: float = randf() * TAU
+	for i in range(shots):
+		var angle: float = start + TAU * float(i) / float(shots)
+		_shots.append({
+			"pos": global_position,
+			"vel": Vector2(cos(angle), sin(angle)) * projectile_speed,
+			"life": SHOT_LIFETIME,
+			"damage": damage * damage_scale,
+			"pierce": pierce_override,
+			"hits": [],
+		})
 
 
 func _segment_distance(from: Vector2, to: Vector2, point: Vector2) -> float:
@@ -124,5 +169,7 @@ func _segment_distance(from: Vector2, to: Vector2, point: Vector2) -> float:
 func _draw() -> void:
 	for shot in _shots:
 		var shot_pos: Vector2 = shot["pos"] - global_position
-		draw_circle(shot_pos, 8.0, Color(1.0, 0.85, 0.3, 0.2))
-		draw_circle(shot_pos, 4.5, Color(1.0, 0.95, 0.6))
+		var tail: Vector2 = (shot["vel"] as Vector2).normalized() * shot_radius * 3.4
+		draw_line(shot_pos - tail, shot_pos, Color(shot_color.r, shot_color.g, shot_color.b, 0.45), shot_radius * 0.9, true)
+		draw_circle(shot_pos, shot_radius * 1.9, Color(shot_color.r, shot_color.g, shot_color.b, 0.2))
+		draw_circle(shot_pos, shot_radius, shot_color)

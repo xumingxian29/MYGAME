@@ -18,14 +18,19 @@ const RETURN_DISTANCE: float = 700.0
 var value: int = 1
 var target: Node2D = null
 
+## 数字用的字体。宝石是高频生成/销毁的对象，每个都 new 一个 SystemFont 会不断分配系统资源
+static var _font: Font
+
 var _speed: float = 0.0
 var _phase: float = 0.0
 var _radius: float = 6.0
 
 
 func _ready() -> void:
+	if _font == null:
+		_font = UiKit.font()
 	_phase = randf() * TAU
-	_radius = 7.5 if value < 3 else 10.0
+	_radius = 8.5 if value < 3 else 11.0
 	queue_redraw()
 
 
@@ -66,3 +71,9 @@ func _draw() -> void:
 	var outline: PackedVector2Array = points.duplicate()
 	outline.append(points[0])
 	draw_polyline(outline, color.lightened(0.6), 1.5)
+
+	# 经验值直接写在宝石上：玩家一眼就能看出这个球值不值得绕路去捡。
+	# 深色字压在亮色宝石上，比白字更清楚，也不用描边。
+	if _font != null:
+		draw_string(_font, Vector2(-10.0, 4.2), str(value), HORIZONTAL_ALIGNMENT_CENTER, 20.0, 11,
+			Color(0.02, 0.04, 0.07))
