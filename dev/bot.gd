@@ -387,7 +387,9 @@ func _aggregate() -> String:
 		var w: float = float(r["wall"])
 		if w >= LIMIT - 0.5:
 			timeout += 1
-		if w > _zone_cap():
+		# 圈在 _zone_cap() 秒归零，毒伤是 0.5 秒一跳，最后一跳最晚晚 3 秒——
+		# 留 10 秒判定余量，否则"正常结算"会被统计成"超时"（上一轮就报了 5 局）。
+		if w > _zone_cap() + 10.0:
 			over_cap += 1
 		if str(r["cause"]) != "未死":
 			deaths += 1

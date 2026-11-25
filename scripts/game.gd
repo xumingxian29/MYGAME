@@ -66,7 +66,27 @@ const ENEMY_HP_QUADRATIC: float = 0.0005
 const ENEMY_SPEED_MIN: float = 62.0
 const ENEMY_SPEED_MAX: float = 94.0
 const ENEMY_SPEED_GROWTH: float = 0.35
+## 速度上限。封在 46 意味着敌人总速 140，而玩家是 226~252——差 90 像素/秒，
+## 会走位的人**永远**不会被追上，后期唯一的死法就是圈缩没（实测 12 局里 8 局死时满血）。
+## 但直接把上限抬到 81（总速 175）是错的方向：那一版战士的中位存活从 483s 掉到 185s，
+## 变成"全程更难"而不是"后期更难"，等于把中期玩家一起劝退。
+## 结论：这条线不要动，后期压力交给下面那条只跟时间走的曲线。
 const ENEMY_SPEED_CAP: float = 46.0
+
+## 后期威胁曲线：一条只跟 elapsed 走的压力，盖在章节权重与基础曲线之上。
+## 为什么需要它：章节时钟会被 Boss 战拖住（见 _physics_process），而"拖住"恰好
+## 集中在后期，于是玩家越强、拖得越久，难度反而越平——这是"满血拖到圈缩没"的根因。
+##
+## 关键是**起点**：0~240 秒必须与没有这条曲线时**一模一样**。早中期动一点，
+## 死亡时间就整体前移（见上面 ENEMY_SPEED_CAP 的对照数据）。
+## 两条压力同步爬升，240 秒起、390 秒爬满：
+##   速度 +28（总速 140→168，仍低于所有职业，但绕圈时必须贴边）
+##   吐息者占比 +0.20（它是唯一不贴身就能造成伤害的敌人，"站桩清屏"不再安全）
+const THREAT_START: float = 240.0
+const THREAT_RAMP: float = 150.0
+const THREAT_SPEED_BONUS: float = 28.0
+const THREAT_SPITTER_BONUS: float = 0.20
+const THREAT_SPECIAL_CAP: float = 0.70
 const ELITE_START_TIME: float = 45.0
 const ELITE_CHANCE: float = 0.12
 
@@ -212,6 +232,20 @@ var _profile: Dictionary = {}
 ## 本局职业，以及菜单里上次选的职业（换人时沿用，不用每次重选）
 var _hero: int = HeroClass.WARRIOR
 var _last_hero: int = HeroClass.WARRIOR
+## 外部打断导致的暂停原因："portrait"（竖屏）/ "hidden"（切后台）。
+## 用一个集合而不是几个 bool：手机可以同时"竖屏 + 切后台"，
+## 只解除其中一个时游戏不该突然跑起来。
+## 也不复用 _state——外力打断不是状态转移，玩家回来必须回到原来的局面
+## （可能在选卡，也可能已经结算）。
+var _external_pauses: Dictionary = {}
+## Web 桥是否可用。非 web 平台（含 headless 自检）恒为 false，所有 JS 调用都要先问它
+var _web_bridged: bool = false
+## create_callback 返回的对象必须用成员变量保引用，否则会被 GC 回收、回调静默失效
+var _web_pause_cb: JavaScriptObject = null
+## 上一次推给 shell 的状态，用来去重：每帧调一次 _publish_web_state 也不会重复写 JSON
+var _web_last_state: int = -1
+var _web_last_paused: bool = false
+var _web_last_reasons: String = ""
 
 
 func _ready() -> void:
@@ -231,6 +265,9 @@ func _ready() -> void:
 	_build_touch()
 	_build_menu()
 	_open_menu()
+	# 窗口尺寸变化（旋转屏幕 / 拖动浏览器窗口 / Web 端 canvas 重排）后要重设一次基准分辨率
+	get_viewport().size_changed.connect(_on_viewport_size_changed)
+	_setup_web_bridge()
 
 
 ## 只在触屏设备上调用。content_scale_size 就是"逻辑分辨率"，
@@ -239,6 +276,83 @@ func _apply_mobile_viewport() -> void:
 	var window: Window = get_window()
 	if window != null:
 		window.content_scale_size = MOBILE_VIEWPORT
+
+
+## 旋转 = 屏幕尺寸变化。手机（尤其 Android）旋转会重建窗口，运行时设过的
+## content_scale_size 会被引擎重置回 project.godot 的 1280x720，而 HUD 与触屏控件
+## 都是按 960x540 布的局 —— 两者对不上就会看到"字突然变大、按钮跑出屏幕"。
+## 所以尺寸一变就重设一次；桌面端 _touch_mode 为 false，这里是空操作。
+func _on_viewport_size_changed() -> void:
+	if _touch_mode:
+		_apply_mobile_viewport()
+
+
+# ---------------------------------------------------------------- 外部打断暂停（Web）
+
+## 只在 Web 导出里跑。桥是双向的：
+##   shell → 引擎  window.__nsPause(reason, 1/0)：reason 是 "portrait" 或 "hidden"
+##   引擎 → shell  window.__nsState(JSON)：让前端提示能区分"正在加载"和"已暂停"
+func _setup_web_bridge() -> void:
+	if not OS.has_feature("web"):
+		return
+	var win: JavaScriptObject = JavaScriptBridge.get_interface("window")
+	if win == null:
+		return
+	_web_bridged = true
+	_web_pause_cb = JavaScriptBridge.create_callback(_on_web_pause)
+	win.__nsPause = _web_pause_cb
+	# 引擎起来之前 shell 可能已经推过原因（玩家竖着打开页面、或者标签页在后台），
+	# 那时候回调还不存在，消息直接丢了。所以反过来主动要一次当前状态。
+	JavaScriptBridge.eval("window.__nsResync && window.__nsResync();", true)
+	_publish_web_state()
+
+
+## shell 传进来的是个 Array（JavaScriptBridge 的回调永远给数组）：
+## [reason: String, on: int]
+func _on_web_pause(args: Array) -> void:
+	if args.size() < 2:
+		return
+	var reason: String = str(args[0])
+	if reason.is_empty():
+		return
+	var on: bool = int(args[1]) != 0
+	# 同一个原因重复推（真机上 change 事件会连发）不该有第二次副作用
+	if on == _external_pauses.has(reason):
+		return
+	if on:
+		_external_pauses[reason] = true
+	else:
+		_external_pauses.erase(reason)
+	_sync_pause()
+	_publish_web_state()
+
+
+## 统一算一次"该不该暂停"。所有解除暂停的路径都必须走这里，
+## 不能直接写 paused = false —— 否则"选卡时切后台"会被开局/选卡结束那两行放跑。
+func _sync_pause() -> void:
+	get_tree().paused = not _external_pauses.is_empty() or _state != State.PLAYING
+
+
+## 把暂停状态写给 shell。只在变化时写（每帧调用也只是一次 int 比较 + 一次 join）。
+func _publish_web_state() -> void:
+	if not _web_bridged:
+		return
+	var paused: bool = get_tree().paused
+	var reasons: String = ",".join(_external_pauses.keys())
+	if _state == _web_last_state and paused == _web_last_paused and reasons == _web_last_reasons:
+		return
+	_web_last_state = _state
+	_web_last_paused = paused
+	_web_last_reasons = reasons
+	var win: JavaScriptObject = JavaScriptBridge.get_interface("window")
+	if win == null:
+		return
+	win.__nsState = JSON.stringify({
+		"paused": paused,
+		"reasons": _external_pauses.keys(),
+		"state": _state,
+		"elapsed": snappedf(_elapsed, 0.1),
+	})
 
 
 func _build_hud() -> void:
@@ -327,7 +441,9 @@ func _begin_run() -> void:
 	zone.reset(_view_radius(), randi())
 	_zone_dmg_timer = 0.0
 	_state = State.PLAYING
-	get_tree().paused = false
+	# 走 _sync_pause 而不是直接 false：竖屏/切后台时开局或选完卡都必须保持冻结
+	# （正常点不到按钮，但 bot 与自检会直接调），否则玩家回来已经挨了两秒打
+	_sync_pause()
 	if touch != null:
 		touch.set_active(true)
 	# 开局就把第一章的名字打出来：玩家进游戏三秒内必须知道"我在哪、要干什么"
@@ -400,6 +516,9 @@ func _pressure() -> float:
 
 
 func _process(_delta: float) -> void:
+	# 暂停状态统一在这里对齐：_state 的写点散在开局/选卡/结算/菜单四处，
+	# 与其到处埋调用，不如让主循环兜住。内部去重，没变化时只是一次 int 比较。
+	_publish_web_state()
 	if _state == State.PLAYING:
 		queue_redraw()
 
@@ -433,13 +552,21 @@ func _spawn_enemy() -> void:
 ## 造一只敌人并挂进 world。位置由调用方给：普通刷怪用视野外的环，
 ## Boss 召唤用 Boss 周围的固定环——后者不该让这里自己去猜。
 ## 所有来源都在这里统一收进安全区：这是唯一的建怪出入口，只在这里夹一次就够。
+## 后期威胁系数：0~THREAT_START 秒恒为 0，之后线性爬满。
+## 所有"后期才该出现的压力"都乘这一项，调起点只改一个数，
+## 不会出现"速度已经在爬、吐息者还没动"的错位。
+func _threat() -> float:
+	return clampf((_elapsed - THREAT_START) / THREAT_RAMP, 0.0, 1.0)
+
+
 func _create_enemy(kind: int, big: bool, at: Vector2) -> void:
 	at = _clamp_point_into_zone(at)
 	var hp: float = ENEMY_HP_BASE + _elapsed * ENEMY_HP_GROWTH + _elapsed * _elapsed * ENEMY_HP_QUADRATIC
 	# 章节倍率乘在全局时间曲线之上：全局曲线负责"越拖越硬"，
 	# 章节倍率负责"越往下越硬"。两者分开，改一章的难度不会影响另一章。
 	hp *= float(Stage.at(_stage_index)["hp_scale"])
-	var speed: float = randf_range(ENEMY_SPEED_MIN, ENEMY_SPEED_MAX) + minf(_elapsed * ENEMY_SPEED_GROWTH, ENEMY_SPEED_CAP)
+	var speed: float = randf_range(ENEMY_SPEED_MIN, ENEMY_SPEED_MAX)
+	speed += minf(_elapsed * ENEMY_SPEED_GROWTH, ENEMY_SPEED_CAP) + THREAT_SPEED_BONUS * _threat()
 	if big:
 		hp *= 2.4
 		# 只减速 15%：太慢的话精英会一直落在队伍后面，永远打不到也杀不掉
@@ -488,7 +615,8 @@ func _spawn_boss() -> void:
 	var stage: Dictionary = Stage.at(_stage_index)
 	var hp: float = (ENEMY_HP_BASE + _elapsed * ENEMY_HP_GROWTH + _elapsed * _elapsed * ENEMY_HP_QUADRATIC) \
 		* BOSS_HP_MULT * float(stage["hp_scale"])
-	var speed: float = (randf_range(ENEMY_SPEED_MIN, ENEMY_SPEED_MAX) + minf(_elapsed * ENEMY_SPEED_GROWTH, ENEMY_SPEED_CAP)) * BOSS_SPEED_SCALE
+	var speed: float = (randf_range(ENEMY_SPEED_MIN, ENEMY_SPEED_MAX) \
+		+ minf(_elapsed * ENEMY_SPEED_GROWTH, ENEMY_SPEED_CAP) + THREAT_SPEED_BONUS * _threat()) * BOSS_SPEED_SCALE
 	var boss_name: String = str(stage["boss"])
 	# 招式风格跟着名字走，不跟着章号：无尽轮次会把这三只循环放出来，
 	# 玩家记住的是"潮主会拍浪"，而不是"第三章的 Boss 会什么"。
@@ -646,12 +774,17 @@ func _roll_kind() -> int:
 		return Enemy.Kind.GRUNT
 	var stage: Dictionary = Stage.at(_stage_index)
 	var p_charger: float = float(stage["charger"])
-	var p_spitter: float = float(stage["spitter"])
+	# 时间威胁曲线压在章节点权重之上：后期同一个章节里吐息者也越来越多。
+	# 用 _threat() 而不是自己算一遍，是为了让这条曲线只有一个起点（240 秒）。
+	var threat: float = _threat()
+	var p_spitter: float = float(stage["spitter"]) + THREAT_SPITTER_BONUS * threat
 	var p_bomber: float = float(stage["bomber"])
 	# 三者之和就是"这只怪是特殊怪"的总概率，剩下的一律普通小兵。
 	# 不能给普通小兵也写一个权重再按总和归一：那样每章加一种特殊怪，
 	# 普通小兵的占比就会被稀释，包围感跟着一起变弱。
-	var total: float = p_charger + p_spitter + p_bomber
+	# 但特殊怪也不能无限挤：全靠特殊怪时场上就没有"人墙"了，
+	# 反而更好清。所以封在 0.7，普通小兵至少留三成。
+	var total: float = minf(p_charger + p_spitter + p_bomber, THREAT_SPECIAL_CAP)
 	if total <= 0.0:
 		return Enemy.Kind.GRUNT
 	var roll: float = randf()
@@ -1055,7 +1188,9 @@ func _choose(index: int) -> void:
 	_pending_cards = maxi(_pending_cards - 1, 0)
 	hud.close_level_up()
 	_state = State.PLAYING
-	get_tree().paused = false
+	# 走 _sync_pause 而不是直接 false：竖屏/切后台时开局或选完卡都必须保持冻结
+	# （正常点不到按钮，但 bot 与自检会直接调），否则玩家回来已经挨了两秒打
+	_sync_pause()
 	if touch != null:
 		touch.set_active(true)
 	_update_hud()

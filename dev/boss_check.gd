@@ -109,8 +109,10 @@ func _test_kits() -> void:
 		# 二阶段：把血打到 40%，phase 会在下一帧切过去
 		boss._health = boss.max_health * 0.4
 		_run(boss, dummy, 5)
+		# 注意 %% ：这是 % 格式化串，写单个 "40%" 会被解析成格式符，
+		# Godot 会报 "unsupported format character" 并中断整个自检（曾经整脚本静默不出结果）
 		_check("二阶段切换", boss._boss_phase_index == 1,
-			"血量 40% 时仍未进入二阶段（phase=%d）" % boss._boss_phase_index)
+			"血量 40%% 时仍未进入二阶段（phase=%d）" % boss._boss_phase_index)
 		_out.append("    二阶段表：%s" % _names(Enemy.BOSS_KIT_TABLES[kit]["two"]))
 		_run(boss, dummy, KIT_FRAMES)
 		var two: Array = Enemy.BOSS_KIT_TABLES[kit]["two"]
