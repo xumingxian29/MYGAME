@@ -13,10 +13,13 @@ extends SceneTree
 ##   kite_ranged 射手绕圈走位、技能好了就放（远程职业：验证"Boss 优先索敌"那条路径）
 ## 必须覆盖远程职业：战士没有远程武器，只用战士测的话子弹相关改动完全测不到。
 
-## 780 秒 = 13 分钟。毒圈时间轴现在 8:00 归零，留 5 分多钟余量不是为了跑满，
-## 而是为了量出"毒圈根本没起作用"的最坏情况——给到时限都不死，说明圈没逼死人。
-## 别把 LIMIT 调成跟圈上限一样：那样"撞上限"和"被圈毒死"就分不开了。
-const LIMIT: float = 780.0
+## 单局模拟上限 = 圈归零时刻 + 120 秒，从 Zone 表里算，不写字面量。
+## 写字面量的代价见过两次：圈从 11:30 改到 8:00 之后旧的 780 仍留在代码里，
+## 每局都要空跑到 13 分钟才结算，一次回归从 7 分钟变成 13 分钟，人就不想跑了。
+## 为什么留 120 秒而不是刚好的归零时刻：
+##   1. 圈归零之后还要结算完 0.5 秒一跳的毒伤（~3 秒）
+##   2. 要能区分"被圈毒死"和"圈根本没起作用"——两者都撞上限就分不开了
+var _limit: float = 780.0
 const BLOCK: float = 30.0
 ## 5 个种子：3 个太少了。实测存活分布是双峰的（战士要么 3 分钟撞上第二只 Boss，
 ## 要么一路活到圈缩没），3 个种子的"中位数"只等于中间那一局，读不出分布。
@@ -57,9 +60,21 @@ var _zone_seen: bool = false
 
 
 func _initialize() -> void:
+	_limit = _zone_cap() + 120.0
 	# idle（完全不动）作为下限只留两个种子：它必然在 60~80 秒死，多跑几局没有信息量，
 	# 却会把"总体中位数"拖到没有意义的低值。实战口径看两个 kite 策略。
-	for s in SEEDS:
+	# 种子默认写死，保证回归可复现（同配置两次跑出来的每一局数字都一样）。
+	# 但"复现"只能证明没漂移，要拿新的统计口径得换种子：
+	#   -- --seeds=21,22,23
+	var seeds: Array[int] = SEEDS
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--seeds="):
+			seeds = []
+			for t in a.substr(8).split(",", false):
+				seeds.append(int(t))
+	if seeds.is_empty():
+		seeds = SEEDS
+	for s in seeds:
 		_runs.append({"strategy": "kite_skill", "seed": s, "hero": HeroClass.WARRIOR, "skill": true})
 		_runs.append({"strategy": "kite_ranged", "seed": s, "hero": HeroClass.RANGER, "skill": true})
 	_runs.append({"strategy": "idle", "seed": 11, "hero": HeroClass.WARRIOR, "skill": false})
@@ -96,7 +111,7 @@ func _process(delta: float) -> bool:
 		_next_run()
 		return false
 
-	if _game._elapsed >= LIMIT:
+	if _game._elapsed >= _limit:
 		_summary("到时限")
 		_next_run()
 		return false
@@ -349,7 +364,11 @@ func _zone_cap() -> float:
 func _aggregate() -> String:
 	var lines: PackedStringArray = []
 	lines.append("")
-	lines.append("=== 汇总  n=%d 局  上限 %.0fs ===" % [_results.size(), LIMIT])
+	# 两个"上限"要分开写清楚，否则读表的人会以为跑动上限就是缩圈时间：
+	# _limit 只是跑动硬截止（用来区分"撞测试上限"和"被毒死"），圈归零是 _zone_cap()。
+	lines.append("=== 汇总  n=%d 局  跑动上限 %.0fs（圈 %.0fs 归零）===" % [
+		_results.size(), _limit, _zone_cap(),
+	])
 	var order: Array[String] = []
 	var all_wall: Array[float] = []
 	for r in _results:
@@ -385,7 +404,7 @@ func _aggregate() -> String:
 	var over_cap: int = 0
 	for r in _results:
 		var w: float = float(r["wall"])
-		if w >= LIMIT - 0.5:
+		if w >= _limit - 0.5:
 			timeout += 1
 		# 圈在 _zone_cap() 秒归零，毒伤是 0.5 秒一跳，最后一跳最晚晚 3 秒——
 		# 留 10 秒判定余量，否则"正常结算"会被统计成"超时"（上一轮就报了 5 局）。
