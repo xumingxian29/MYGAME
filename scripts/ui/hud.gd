@@ -77,6 +77,9 @@ var _boss_phase_label: Label
 ## 状态字：攻击中 / 破甲 2.4s。这是整场 Boss 战里唯一"每秒都在变"的信息，
 ## 玩家打 Boss 时视线本来就压在血条上，不需要再去找别的地方。
 var _boss_state_label: Label
+## 王座厅的名次（"2/5"）。空串表示这是一只普通关底，
+## 阶段标签就只写"第一阶段"，不占那 48 像素。
+var _boss_rank: String = ""
 ## 缓存当前状态，避免 10Hz 的刷新每次都重建 StyleBox 与主题色覆盖
 var _boss_vulnerable: bool = false
 var _boss_state_text: String = ""
@@ -593,48 +596,69 @@ func set_gold(amount: int) -> void:
 ## 再造一套只会多一份需要同步的可见性状态。
 ## 文案里必须写清"不回血"——玩家如果以为换图补血，会带着残血点确定，
 ## 然后把这次死亡记到"传送"头上，而不是记到自己没买药上。
-func open_portal_confirm(reward_text: String, map_index: int, next_power_pct: int) -> void:
+## 进门确认。文案全部由 Game 传进来（它才知道当前是第几幕、下一幕叫什么）：
+## HUD 不认识剧情表，也不该认识——否则改一句台词要改两个文件。
+## final = 最后一扇门（胜利门），它不通向下一幕，所以三级文案都要换。
+func open_portal_confirm(reward_text: String, current_text: String, next_text: String,
+		next_power_pct: int, final: bool = false) -> void:
 	_clear_panel()
 	_dim.visible = true
 	_panel.visible = true
 
-	var title := _make_label("进入下一张地图？", 26, Color(0.95, 0.97, 1.0))
+	var title := _make_label("走出城堡？" if final else "进入下一幕？", 26,
+		Color(1.0, 0.94, 0.72) if final else Color(0.95, 0.97, 1.0))
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(title)
 
-	var body := _make_label("第 %d 图 → 第 %d 图　·　敌人属性 +%d%%\n这扇门给的是：%s"
-		% [map_index, map_index + 1, next_power_pct, reward_text],
-		15, Color(0.74, 0.84, 0.98))
+	var body_text: String = "西门外是黎明。\n这扇门给的是：结算本局，记下分数"
+	if not final:
+		body_text = "%s → %s　·　敌人属性 +%d%%\n这扇门给的是：%s" % [
+			current_text, next_text, next_power_pct, reward_text,
+		]
+	var body := _make_label(body_text, 15, Color(0.74, 0.84, 0.98))
 	body.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_panel_box.add_child(body)
 
-	var warn := _make_label("传送不回血，也不清空金币", 14, Color(0.94, 0.72, 0.42))
+	var warn := _make_label(
+		"走出去，这一局就结束了" if final else "传送不回血，也不清空金币",
+		14, Color(1.0, 0.86, 0.46) if final else Color(0.94, 0.72, 0.42))
 	warn.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(warn)
 
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", 14)
-	row.add_child(_make_action_button("继续前进", Color(1.0, 0.85, 0.48), portal_confirmed.emit))
-	row.add_child(_make_action_button("再想想", Color(0.52, 0.68, 0.92), portal_cancelled.emit))
+	row.add_child(_make_action_button("走出去" if final else "继续前进",
+		Color(1.0, 0.85, 0.48), portal_confirmed.emit))
+	row.add_child(_make_action_button("再逛逛" if final else "再想想",
+		Color(0.52, 0.68, 0.92), portal_cancelled.emit))
 	_panel_box.add_child(row)
 
 
 ## 商店面板。stock 由 Game 组织，HUD 只负责画：
 ## 买不买得起、买过没有，都靠 price / bought 两个字段表达，
 ## 价格校验一行都不在这里做——HUD 不该知道玩家有多少钱。
-func open_shop(gold: int, stock: Array[Dictionary]) -> void:
+func open_shop(gold: int, stock: Array[Dictionary], line: String = "") -> void:
 	_clear_panel()
 	_dim.visible = true
 	_panel.visible = true
 
-	var title := _make_label("流浪商人", 26, Color(1.0, 0.93, 0.70))
+	var title := _make_label("塔里的商人", 26, Color(1.0, 0.93, 0.70))
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(title)
 
 	var wallet := _make_label("金币 %d" % gold, 16, Color(1.0, 0.86, 0.34))
 	wallet.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(wallet)
+
+	# 商人的一句台词。空串时不占位——这句话只负责"城堡里的定价有来历"这层意思，
+	# 没有它面板依然能用，所以不该为它留一行空白。
+	if not line.is_empty():
+		var quote := _make_label(line, 13, Color(0.80, 0.80, 0.90))
+		quote.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		quote.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_panel_box.add_child(quote)
 
 	for i in range(stock.size()):
 		_panel_box.add_child(_make_shop_row(stock[i], gold, i))
@@ -731,10 +755,15 @@ func _tick_banner(delta: float) -> void:
 ## 这里只负责把条亮出来并归位。
 ## style 是这只 Boss 的招式风格名（潮汐/游影/深噬）。三只 Boss 的招式不同，
 ## 光写名字玩家分不出"这次打的是不是同一套"，所以名字后面带上它怎么打。
-func show_boss(boss_name: String, style: String = "") -> void:
+func show_boss(boss_name: String, style: String = "", rank: String = "") -> void:
 	if _boss_panel == null:
 		return
 	_set_text(_boss_name_label, boss_name if style.is_empty() else "%s · %s" % [boss_name, style])
+	# 名次（"2/5"）只出现在王座厅。它必须挂在阶段标签上而不是名字后面：
+	# 名字已经很长了，再挤一段进去会被 clip_text 截掉后半句。
+	_boss_rank = rank
+	if _boss_phase_label != null:
+		_boss_phase_label.custom_minimum_size = Vector2(112.0 if not rank.is_empty() else 64.0, 0.0)
 	# 上一只 Boss 的"破甲"状态不能带过来：留着的话新 Boss 一出场血条就是金色
 	_boss_vulnerable = false
 	_boss_state_text = ""
@@ -756,7 +785,10 @@ func set_boss_phase(phase: int) -> void:
 	if _boss_phase_label == null:
 		return
 	_boss_phase_value = phase
-	_set_text(_boss_phase_label, "第二阶段" if phase >= 1 else "第一阶段")
+	var text: String = "第二阶段" if phase >= 1 else "第一阶段"
+	if not _boss_rank.is_empty():
+		text = "%s · %s" % [_boss_rank, text]
+	_set_text(_boss_phase_label, text)
 	_refresh_boss_fill()
 
 
@@ -865,26 +897,30 @@ func show_game_over(result: Dictionary) -> void:
 	var profile: Dictionary = result["profile"]
 	var best: Dictionary = profile["best"]
 	var cleared: bool = bool(result.get("cleared", false))
+	var act_index: int = int(result.get("act_index", 0))
+	var by_zone: bool = str(result.get("death_cause", "敌人")) == "圈外"
 
-	# 通关局不该说"你被淹没了"：那会让唯一的正面结果读起来像失败。
+	# 标题用幕号而不是"你被淹没了"：十幕的一局里，
+	# 玩家真正记得住的是"我卡在第七幕"，不是"我又死了一次"。
 	var title := _make_label(
-		"你走完了三章" if cleared else "你被淹没了",
-		30, Color(1.0, 0.9, 0.62) if cleared else Color(1.0, 0.86, 0.86),
+		"你走出了城堡" if cleared else Story.defeat_title(act_index),
+		_panel_f(30), Color(1.0, 0.9, 0.62) if cleared else Color(1.0, 0.86, 0.86),
 	)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(title)
 
-	var who := _make_label("玩家 %s" % str(profile["name"]), 15, Color(0.78, 0.85, 0.96))
+	var who := _make_label("玩家 %s" % str(profile["name"]), _panel_f(15), Color(0.78, 0.85, 0.96))
 	who.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(who)
 
-	# 死因单独一行：不加这句，"怎么死的"只能靠玩家自己回忆最后两秒。
-	# 通关局不显示——那局不是被打死的。
+	# 一句剧情旁白 + 一行"怎么死的"。前者负责这局的情绪，后者负责下次怎么改。
 	if not cleared:
-		var by_zone: bool = str(result.get("death_cause", "敌人")) == "圈外"
+		var line := _make_label(Story.defeat_line(act_index, by_zone), _panel_f(14), Color(0.78, 0.70, 0.86))
+		line.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_panel_box.add_child(line)
 		var cause := _make_label(
 			"死因：倒在安全区外" if by_zone else "死因：被敌人淹没",
-			13, Color(0.86, 0.7, 1.0) if by_zone else Color(0.82, 0.66, 0.66),
+			_panel_f(13), Color(0.72, 0.60, 0.60),
 		)
 		cause.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		_panel_box.add_child(cause)
@@ -905,7 +941,7 @@ func show_game_over(result: Dictionary) -> void:
 	# 而对刷怪游戏来说，"推进到第几章"才是玩家真正记得住的进度。
 	_panel_box.add_child(_stat_row(
 		"存活",
-		"%s · %s" % [str(result["time_text"]), str(result.get("stage_name", ""))],
+		"%s · %s" % [str(result["time_text"]), str(result.get("act_name", ""))],
 		"+%d" % int(result["time_points"]),
 		Color(0.72, 0.86, 0.98),
 	))
@@ -928,10 +964,10 @@ func show_game_over(result: Dictionary) -> void:
 
 	var total_row := HBoxContainer.new()
 	total_row.add_theme_constant_override("separation", 12)
-	var total_label := _make_label("总分", 22, Color(0.9, 0.95, 1.0))
+	var total_label := _make_label("总分", _panel_f(22), Color(0.9, 0.95, 1.0))
 	total_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	total_row.add_child(total_label)
-	var total_value := _make_label(str(int(result["score"])), 34, Color(1.0, 0.9, 0.55))
+	var total_value := _make_label(str(int(result["score"])), _panel_f(34), Color(1.0, 0.9, 0.55))
 	total_value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	total_row.add_child(total_value)
 	_panel_box.add_child(total_row)
@@ -941,7 +977,7 @@ func show_game_over(result: Dictionary) -> void:
 	if is_best:
 		best_text = "个人最高 %d · 新纪录！" % int(result["score"])
 	var best_label := _make_label(
-		best_text, 16,
+		best_text, _panel_f(16),
 		Color(1.0, 0.85, 0.45) if is_best else Color(0.72, 0.79, 0.9),
 	)
 	best_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -951,13 +987,110 @@ func show_game_over(result: Dictionary) -> void:
 		"第 %d 次挑战 · 累计击杀 %d%s" % [
 			int(profile["runs"]), int(profile["total_kills"]), _best_suffix(result),
 		],
-		13, Color(0.62, 0.68, 0.8),
+		_panel_f(13), Color(0.62, 0.68, 0.8),
 	)
 	record.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(record)
 
 	# 鼠标和触屏都必须能点：早先桌面端只给一行快捷键文字，用鼠标的玩家在结算页点不动
 	# （试玩反馈：只能靠快捷键回主界面）。快捷键保留为附加路径，不再是唯一路径。
+	_panel_box.add_child(_make_action_row())
+	if not _touch_mode:
+		var hint := _make_label("快捷键：R 再来一局　P / ESC 换人", 13, Color(0.62, 0.7, 0.84))
+		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_panel_box.add_child(hint)
+
+	_dim.visible = true
+	_panel.visible = true
+
+
+## 胜利结算。和死亡结算共用同一块面板，但换一套配色与文案：
+## 金色描边、暖色标题、最后三行收尾旁白。
+## 为什么不再单开一屏"胜利剧情"：玩家刚连打五个守门人，
+## 最想知道的是分数和"我第几次逃出来"，再压一段独白就是拦路。
+func show_victory(result: Dictionary) -> void:
+	_clear_panel()
+	_panel.custom_minimum_size = Vector2(560, 0)
+	_panel.add_theme_stylebox_override("panel", _panel_style(Color(1.0, 0.86, 0.46, 0.85)))
+
+	var profile: Dictionary = result["profile"]
+	var best: Dictionary = profile["best"]
+
+	var title := _make_label("你走出了城堡", _panel_f(32), Color(1.0, 0.92, 0.62))
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_panel_box.add_child(title)
+
+	var sub := _make_label("第 %d 幕 · 王座厅　·　守门人 %d/%d" % [
+		int(result.get("acts", Story.ACT_COUNT)), int(result.get("bosses", 0)),
+		int(result.get("bosses", 0)),
+	], _panel_f(14), Color(0.86, 0.88, 0.96))
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_panel_box.add_child(sub)
+
+	# 收尾旁白：三行，一行一句。放在分数上面，是因为它们是这一局"结束"的信号，
+	# 玩家扫一眼就去看数字了——反过来放会在分数之后被完全忽略。
+	for line in Story.epilogue():
+		var node := _make_label(line, _panel_f(13), Color(0.80, 0.78, 0.90))
+		node.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		node.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_panel_box.add_child(node)
+
+	_panel_box.add_child(_divider())
+	_panel_box.add_child(_stat_row(
+		"击杀",
+		"%d 只 · 精英 %d · Boss %d" % [
+			int(result["kills"]), int(result["elite_kills"]), int(result.get("boss_kills", 0)),
+		],
+		"+%d" % int(result["kill_points"]),
+		Color(0.9, 0.72, 0.72),
+	))
+	_panel_box.add_child(_stat_row(
+		"时长",
+		str(result["time_text"]),
+		"+%d" % int(result["time_points"]),
+		Color(0.72, 0.86, 0.98),
+	))
+	_panel_box.add_child(_stat_row(
+		"成长",
+		"Lv.%d · 经验 %d" % [int(result["level"]), int(result["xp_total"])],
+		"+%d" % int(result["growth_points"]),
+		Color(0.78, 0.92, 0.78),
+	))
+	# 通关奖励单独一行：它是这一局唯一"只有逃出去才拿得到"的分，
+	# 混进总分里玩家不会知道自己赢在哪。
+	_panel_box.add_child(_stat_row(
+		"逃离",
+		"打开西城门 · 附带奖励",
+		"+%d" % int(result.get("victory_points", 0)),
+		Color(1.0, 0.86, 0.46),
+	))
+	_panel_box.add_child(_divider())
+
+	var total_row := HBoxContainer.new()
+	total_row.add_theme_constant_override("separation", 12)
+	var total_label := _make_label("总分", _panel_f(22), Color(0.9, 0.95, 1.0))
+	total_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	total_row.add_child(total_label)
+	var total_value := _make_label(str(int(result["score"])), _panel_f(36), Color(1.0, 0.92, 0.55))
+	total_value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	total_row.add_child(total_value)
+	_panel_box.add_child(total_row)
+
+	var is_best: bool = bool(result["is_best"])
+	var best_text: String = "个人最高 %d" % int(best["score"])
+	if is_best:
+		best_text = "个人最高 %d · 新纪录！" % int(result["score"])
+	var best_label := _make_label(best_text, _panel_f(16),
+		Color(1.0, 0.85, 0.45) if is_best else Color(0.72, 0.79, 0.9))
+	best_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_panel_box.add_child(best_label)
+
+	var count := _make_label("第 %d 次逃出城堡 · 累计击杀 %d" % [
+		int(profile.get("victories", 1)), int(profile["total_kills"]),
+	], _panel_f(13), Color(1.0, 0.82, 0.58))
+	count.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_panel_box.add_child(count)
+
 	_panel_box.add_child(_make_action_row())
 	if not _touch_mode:
 		var hint := _make_label("快捷键：R 再来一局　P / ESC 换人", 13, Color(0.62, 0.7, 0.84))
@@ -1013,11 +1146,13 @@ func _make_tool_button(text: String, accent: Color, callback: Callable) -> Butto
 func _make_action_button(text: String, accent: Color, callback: Callable) -> Button:
 	var button := Button.new()
 	button.text = text
-	button.custom_minimum_size = Vector2(176, 54)
+	# 触屏的逻辑高只有 540：54 高的按钮在手机上已经是 39 CSS 像素，
+	# 再高就把结算面板顶出屏幕。46 折算下来约 33，仍是拇指点得准的档位。
+	button.custom_minimum_size = Vector2(176, 46) if _touch_mode else Vector2(176, 54)
 	button.focus_mode = Control.FOCUS_NONE
 	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	button.add_theme_font_override("font", UiKit.font())
-	button.add_theme_font_size_override("font_size", 20)
+	button.add_theme_font_size_override("font_size", _panel_f(20))
 	for key in ["font_color", "font_hover_color", "font_pressed_color", "font_focus_color"]:
 		button.add_theme_color_override(key, Color(0.07, 0.09, 0.13))
 	button.add_theme_stylebox_override("normal", UiKit.flat(accent, accent.lightened(0.35), 10, 0))
@@ -1064,6 +1199,9 @@ func show_pause(shown: bool, subtitle: String = "") -> void:
 # ---------------------------------------------------------------- 面板零件
 
 func _clear_panel() -> void:
+	# 行距跟着设备走：触屏的 540 逻辑高装不下桌面那套间距。
+	# 放在这里统一设，比在每个 show_* 里各写一次更不容易漏。
+	_panel_box.add_theme_constant_override("separation", 6 if _touch_mode else 10)
 	for child in _panel_box.get_children():
 		_panel_box.remove_child(child)
 		child.queue_free()
@@ -1083,19 +1221,26 @@ func _stat_row(title: String, detail: String, points: String, accent: Color) -> 
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 10)
 
-	var left := _make_label(title, 17, accent)
+	var left := _make_label(title, _panel_f(17), accent)
 	left.custom_minimum_size = Vector2(64, 0)
 	row.add_child(left)
 
-	var mid := _make_label(detail, 16, Color(0.86, 0.9, 0.97))
+	var mid := _make_label(detail, _panel_f(16), Color(0.86, 0.9, 0.97))
 	mid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(mid)
 
-	var right := _make_label(points, 18, accent)
+	var right := _make_label(points, _panel_f(18), accent)
 	right.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	right.custom_minimum_size = Vector2(90, 0)
 	row.add_child(right)
 	return row
+
+
+## 结算面板的字号。触屏的逻辑高度只有 540（桌面是 720），
+## 桌面版 587 高的胜利面板放到手机上会把底部两个按钮顶出屏幕
+## ——这是渲染截图里量到的，不是估计。整套文案按 0.82 收一档，再压一点行距就回来了。
+func _panel_f(base: int) -> int:
+	return int(round(float(base) * 0.82)) if _touch_mode else base
 
 
 func _divider() -> ColorRect:

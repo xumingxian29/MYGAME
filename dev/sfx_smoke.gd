@@ -34,6 +34,9 @@ func _initialize() -> void:
 	root.add_child(_game)
 	await process_frame
 	_game._on_menu_started("冒烟", HERO)
+	_game.story_enabled = false
+	if _game.story_panel != null and _game.story_panel.is_open():
+		_game.story_panel.skip()
 	await process_frame
 
 	_audio = _game.audio

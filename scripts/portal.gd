@@ -18,7 +18,11 @@ signal request_enter(portal: Portal)
 
 ## 回血门已经删掉：传送不再回血是这一版的设计前提。
 ## HEAL 腾出来的位置给了双卡门——同样是"立刻变强"，但不碰血线。
-enum Reward { CARD, CARD2, BREACH, GOLD }
+##
+## VICTORY 是最后一扇门：它不通向"下一张图"，而是通向西门外。
+## 放在同一个枚举里，是因为它在地图上的表现（一圈会转的门 + 一行字）
+## 和另外四扇完全一样——玩家不需要学第二种"出口"。
+enum Reward { CARD, CARD2, BREACH, GOLD, VICTORY }
 
 ## 四扇门不再"难度一样、只有奖励不同"。原来无论走哪扇，下一层都是 +10%，
 ## 于是"选门"退化成"选奖励"——玩家永远挑最值的那扇，选择本身没有代价。
@@ -30,6 +34,9 @@ const DIFFICULTY: Dictionary = {
 	Reward.BREACH: 0.40,
 	Reward.GOLD: 0.60,
 	Reward.CARD2: 1.00,
+	# 胜利门后面没有下一张图，所以不加难度。写 0 而不是"不放进字典"，
+	# 是为了让 difficulty() / difficulty_text() 这两条路径对所有门都成立。
+	Reward.VICTORY: 0.0,
 }
 
 ## 环的半径。比玩家半径大得多：门要"看着能走进去"，而不是一个贴地的小图标。
@@ -110,6 +117,9 @@ func reward_color() -> Color:
 			return Color(0.98, 0.72, 0.30)
 		Reward.GOLD:
 			return Color(1.0, 0.86, 0.34)
+		Reward.VICTORY:
+			# 晨光的颜色：这一局里唯一一个"暖到发白"的门
+			return Color(1.0, 0.95, 0.80)
 		_:
 			return Color(0.62, 0.72, 1.0)
 
@@ -122,6 +132,8 @@ func reward_text() -> String:
 			return "破甲弹 +3"
 		Reward.GOLD:
 			return "金币 +90"
+		Reward.VICTORY:
+			return "离开城堡"
 		_:
 			return "额外一张卡"
 
@@ -179,6 +191,16 @@ func _draw() -> void:
 				var off := Vector2(float(i - 2) * 6.0, float(i - 2) * -3.5)
 				var rect := Rect2(off - Vector2(5.0, 8.0), Vector2(10.0, 16.0))
 				draw_rect(rect, glyph, false, 1.6)
+		Reward.VICTORY:
+			# 一扇拱门 + 门缝里的光。它和另外四扇的图形语言完全不同，
+			# 因为它是这一局唯一的"出口"，不能被认成"又一个奖励"。
+			draw_arc(Vector2(0.0, -4.0), 13.0, PI, TAU, 18, glyph, 2.4, true)
+			draw_line(Vector2(-13.0, -4.0), Vector2(-13.0, 16.0), glyph, 2.4)
+			draw_line(Vector2(13.0, -4.0), Vector2(13.0, 16.0), glyph, 2.4)
+			for i in range(3):
+				var ly: float = 2.0 + float(i) * 5.0
+				draw_line(Vector2(-7.0, ly), Vector2(7.0, ly),
+					Color(glyph.r, glyph.g, glyph.b, glyph.a * (0.28 - float(i) * 0.06)), 3.0)
 		_:
 			# 三张叠起来的卡
 			for i in range(3):
@@ -192,5 +214,6 @@ func _draw() -> void:
 	var text_alpha: float = 0.92 if _armed else 0.45
 	draw_string(font, Vector2(-70.0, RADIUS + 24.0), reward_text(),
 		HORIZONTAL_ALIGNMENT_CENTER, 140.0, 13, Color(1.0, 0.97, 0.92, text_alpha))
-	draw_string(font, Vector2(-70.0, RADIUS + 40.0), "难度 " + difficulty_text(),
+	var sub: String = "西门外 · 黎明" if reward == Reward.VICTORY else "难度 " + difficulty_text()
+	draw_string(font, Vector2(-70.0, RADIUS + 40.0), sub,
 		HORIZONTAL_ALIGNMENT_CENTER, 140.0, 12, Color(1.0, 0.76, 0.60, 0.9 * text_alpha))

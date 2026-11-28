@@ -6,7 +6,9 @@ extends Node2D
 ## PAUSED 放末尾而不是插在 PLAYING 后面：前四个值会被 _publish_web_state 序列化给
 ## shell（数字直接写进 JSON），改序号会让前端那套"加载中 / 已暂停"判断错位。
 ## CONFIRM / SHOP 同属"整棵树冻结、HUD 面板可点"，靠状态名区分弹的是哪一块。
-enum State { MENU, PLAYING, LEVEL_UP, GAME_OVER, PAUSED, CONFIRM, SHOP }
+## STORY / VICTORY 追加在末尾：同样冻结世界，但走的是另一套界面
+## （剧情屏 / 胜利结算）。旧值一个都不许动，shell 那边按数字判断状态。
+enum State { MENU, PLAYING, LEVEL_UP, GAME_OVER, PAUSED, CONFIRM, SHOP, STORY, VICTORY }
 
 ## 前期节奏：前 GRACE_TIME 秒维持最轻压力，再在 RAMP_TIME 秒内平滑升到最重。
 ## 所有难度数值都从 _pressure() 取，改曲线只需要动这两个常量。
@@ -135,7 +137,7 @@ const THREAT_SPECIAL_CAP: float = 0.70
 const ELITE_START_TIME: float = 45.0
 const ELITE_CHANCE: float = 0.12
 
-## 每穿过一道传送门，下一张图的普通怪全部属性 ×1.10（累乘，不是加法）。
+## 每穿过一道传送门，下一幕的普通怪属性按门的难度累加上去（加法，不是连乘）。
 ## 为什么是累乘：玩家过一关拿一张卡 + 回一部分血，成长是乘法级的（卡牌叠乘），
 ## 敌人用加法会被越甩越远——这正是旧版"越后期越宽裕"的根因。
 ## 10% 这个数不是拍的：三张图之后 1.33，五张图之后 1.61，刚好和玩家一轮成型
@@ -307,7 +309,8 @@ var _boss_grace: float = 0.0
 ## 这样"打了 30 秒 Boss"不会把下一章的开场时间吃掉。
 var _stage_index: int = 0
 var _stage_time: float = 0.0
-## 是否已经走完三章。通关后继续无尽循环，所以它是"达成过"而不是"结束了"
+## 这一局是否逃出了城堡。它由 _on_victory 唯一写入——
+## 十幕之后，"通关"不再等于"章节数够了"（那个判断会在第四幕误触发）。
 var _cleared: bool = false
 ## 发卡延迟：章节开场要先把横幅读完，再弹选卡面板。
 ## 没有这个延迟时，横幅会被压暗层盖住，玩家只看到一张卡，不知道自己在哪一章。
@@ -327,6 +330,23 @@ var maze: MazeMap = null
 
 ## 第几张地图。三个传送门每次换图 +1，HUD 与结算面板都读它。
 var _map_index: int = 0
+## 一局能穿过的门数。第 10 扇门之后不是"下一张图"，而是王座厅。
+## 写成常量而不是散在判断里：剧情有 10 幕、门的计数上限、HUD 上的 "N/10"
+## 三处必须永远是同一个数，否则玩家会在第 9 幕看到一个空屏。
+const PORTAL_LIMIT: int = 10
+## 王座厅的守门人数量与出场节奏。
+## 16 + 8×i 发：五位分别是 16/24/32/40/48 发，合计 160 发。
+## 这个数不是拍的：一次破甲窗口 3.0 秒、按 0.25 秒的锁定间隔最多吃 4 发，
+## 16 发等于"必须走完四个窗口"，而窗口之间玩家要躲招、捡弹——
+## 五位连着打，节奏才刚好是"一场长战"而不是五场小战。
+const GAUNTLET_BASE_SHOTS: int = 12
+const GAUNTLET_SHOT_STEP: int = 2
+## 王座厅的破甲弹掉率（秒/枚）。比平时快：五位连着打，中间没有普通怪给玩家
+## "用击杀换弹"的机会，掉率必须直接喂到手上，否则第四位就只能看着它放招。
+const GAUNTLET_BREACH_EVERY: float = 1.5
+## 两位守门人之间的间隔。太短的话前一位的弹幕还没散，下一位就贴脸进场了。
+const GAUNTLET_GAP: float = 2.4
+
 ## 已经穿过几道传送门。
 ## 和 _map_index 分开记：_map_index 是"玩家看到第几张图"（含第一张，从 0 起），
 ## _floor 是"被放大过几次"（第一张图是 0 次）。两者数值恰好相同但语义不同。
@@ -344,6 +364,25 @@ var _awaiting_portal: bool = false
 var _portals: Array[Portal] = []
 ## 玩家踩上去、正在等确认的那扇门。null 表示当前没有待确认的门。
 var _pending_portal: Portal = null
+## 已经穿过的门数（0..PORTAL_LIMIT）。第 PORTAL_LIMIT 扇门之后进王座厅，
+## 而不是"再换一张图"。之所以单独计数而不是用 _map_index：
+## 王座厅也是一张图，但它不是"又过了一道门"。
+var _portal_count: int = 0
+## 王座厅：还剩几位守门人 / 一共几位 / 下一位的下标 / 出场倒计时。
+var _gauntlet_left: int = 0
+var _gauntlet_total: int = 0
+var _gauntlet_index: int = 0
+var _gauntlet_delay: float = 0.0
+## 这一局是不是"逃出城堡"。结算面板与存档都靠它区分胜利与阵亡。
+var _victory: bool = false
+## 剧情屏。开场与每次穿门各播一幕，播完由 _story_after 决定接着做什么。
+var story_panel: StoryPanel = null
+## 自检 / 台架开关。关掉之后 _play_story 会立刻按"已播完"收尾，
+## 但横幅、新手提示、状态转换一步不少——量到的还是同一条流程，
+## 只是不用等打字。默认开着，玩家那边永远走真剧情。
+var story_enabled: bool = true
+var _story_open: bool = false
+var _story_after: String = ""
 ## 本图的商人。换图时旧的要显式 free：_rebuild_map 只清敌人/宝石/道具/地图，
 ## 商人不在那几张表里，不点名清就会跟着进下一张图。
 var _merchant: Merchant = null
@@ -420,6 +459,9 @@ func _ready() -> void:
 	_build_tutorial()
 	_build_touch()
 	_build_menu()
+	# 剧情屏最后建：它要盖在 HUD、菜单、触屏控件之上。
+	# 建在前面的话，菜单背后的剧情屏会被后建的 HUD 压住（Node2D/Control 按子节点顺序绘制）。
+	_build_story()
 	_open_menu()
 	# 窗口尺寸变化（旋转屏幕 / 拖动浏览器窗口 / Web 端 canvas 重排）后要重设一次基准分辨率
 	get_viewport().size_changed.connect(_on_viewport_size_changed)
@@ -555,6 +597,108 @@ func _build_menu() -> void:
 	start_menu.started.connect(_on_menu_started)
 
 
+func _build_story() -> void:
+	# 剧情屏必须挂在一个 CanvasLayer 下面：Control 的锚点是相对"父节点的矩形"算的，
+	# 而 Game 是 Node2D，没有矩形——直接 add_child 之后 PRESET_FULL_RECT 会失效，
+	# 整块面板缩到左上角一小团（截图抓到的）。
+	# 项目里 HUD / 触屏 / 菜单全是 CanvasLayer，这里沿用同一套。
+	var layer := CanvasLayer.new()
+	layer.name = "StoryLayer"
+	# layer 5：压在 HUD（默认 1）与菜单之上。剧情的语义就是"盖住一切"。
+	layer.layer = 5
+	add_child(layer)
+	story_panel = StoryPanel.new()
+	story_panel.name = "Story"
+	layer.add_child(story_panel)
+	story_panel.finished.connect(_on_story_finished)
+
+
+## 播一幕剧情。after 决定播完之后接哪一段流程：
+##   "start"  —— 新一局的开场，播完才把世界放开
+##   "portal" —— 刚穿过一道门，新图已经建好了（**先建地图再播剧情**：
+##               剧情播完玩家睁眼就在新房间里，而不是先看到旧房间再闪一下）
+##   "final"  —— 第 10 扇门之后，王座厅，播完开始放第一位守门人
+func _play_story(act_index: int, after: String) -> void:
+	if not story_enabled:
+		# 直接把"播完"这一刻走一遍。不能只是 return——那是跳过整段流程，
+		# 状态会永远停在 STORY，自检跑不起来。
+		_story_open = true
+		_story_after = after
+		_on_story_finished(true)
+		return
+	if story_panel == null:
+		# 剧情屏建不出来也不能把流程卡死：直接按"已播完"处理
+		_story_open = true
+		_story_after = after
+		_on_story_finished(true)
+		return
+	_story_after = after
+	_story_open = true
+	_state = State.STORY
+	hud.clear_overlays()
+	if touch != null:
+		touch.set_active(false)
+	_sync_pause()
+	var act: Dictionary = Story.act(act_index)
+	story_panel.play(act["lines"], Story.title(act_index),
+		Story.progress_text(act_index), Story.tint(act_index))
+
+
+## 终章（王座厅）。和 _play_story 只差"取哪份数据"，
+## 但它在流程上是一次性的：播完不再有"下一幕"，只有五位守门人。
+func _play_finale(after: String) -> void:
+	if not story_enabled:
+		_story_open = true
+		_story_after = after
+		_on_story_finished(true)
+		return
+	if story_panel == null:
+		_story_open = true
+		_story_after = after
+		_on_story_finished(true)
+		return
+	_story_after = after
+	_story_open = true
+	_state = State.STORY
+	hud.clear_overlays()
+	if touch != null:
+		touch.set_active(false)
+	_sync_pause()
+	story_panel.play(Story.finale_lines(), Story.finale_title(), "十道门 · 走完了",
+		Story.finale_tint())
+
+
+func _on_story_finished(_skipped: bool) -> void:
+	if not _story_open:
+		return
+	_story_open = false
+	var after: String = _story_after
+	_story_after = ""
+	_state = State.PLAYING
+	if touch != null:
+		touch.set_active(true)
+	_sync_pause()
+	var act_index: int = mini(_map_index, Story.ACT_COUNT - 1)
+	match after:
+		"start":
+			# 开局那一段：横幅与新手提示都要等剧情播完再出，
+			# 否则它们在剧情屏背后放完，玩家一个字都看不到
+			_apply_stage_look(Stage.at(_stage_index))
+			hud.show_banner(Story.title(0), Story.beat(0), Story.tint(0), false)
+			if tutorial != null:
+				tutorial.reset_session()
+				tutorial.notify("move",
+					"WASD / 方向键 移动 · 攻击是自动的，专心走位就行",
+					"左侧拖动 移动 · 攻击是自动的，专心走位就行",
+					3.2, 1.6)
+		"portal":
+			hud.show_banner(Story.title(act_index), Story.beat(act_index),
+				Story.tint(act_index), false)
+		"final":
+			hud.show_banner(Story.finale_title(), Story.finale_beat(), Story.finale_tint(), true)
+	_update_hud()
+
+
 ## 开局菜单：默认填入上次玩的昵称，并列出本机所有玩家
 func _open_menu() -> void:
 	_state = State.MENU
@@ -613,6 +757,14 @@ func _begin_run() -> void:
 	_portals.clear()
 	_floor = 0
 	_floor_power = 0.0
+	_portal_count = 0
+	_gauntlet_left = 0
+	_gauntlet_total = 0
+	_gauntlet_index = 0
+	_gauntlet_delay = 0.0
+	_victory = false
+	_story_open = false
+	_story_after = ""
 	_stage_index = 0
 	_stage_time = 0.0
 	_cleared = false
@@ -639,24 +791,11 @@ func _begin_run() -> void:
 	maze.rebuild_flow(maze.start_pos())
 	_spawn_merchant()
 	_map_index = 0
-	_state = State.PLAYING
-	# 走 _sync_pause 而不是直接 false：竖屏/切后台时开局或选完卡都必须保持冻结
-	# （正常点不到按钮，但 bot 与自检会直接调），否则玩家回来已经挨了两秒打
-	_sync_pause()
-	if touch != null:
-		touch.set_active(true)
-	# 开局就把第一章的名字打出来：玩家进游戏三秒内必须知道"我在哪、要干什么"
-	_apply_stage_look(Stage.at(_stage_index))
-	hud.show_banner(Stage.title(_stage_index), str(Stage.at(_stage_index)["subtitle"]), Stage.tint(_stage_index), false)
+	# 不直接进 PLAYING：先播第一幕。剧情期间整棵树冻结，
+	# 横幅与新手提示都在剧情播完之后才出（见 _on_story_finished），
+	# 否则它们会在剧情屏背后放完，玩家一个字都看不到。
+	_play_story(0, "start")
 	_update_hud()
-	if tutorial != null:
-		# 清掉上一局没播完的队列，但保留"看过什么"——
-		# 这正是"第二次进来不再啰嗦"的落点。
-		tutorial.reset_session()
-		tutorial.notify("move",
-			"WASD / 方向键 移动 · 攻击是自动的，专心走位就行",
-			"左侧拖动 移动 · 攻击是自动的，专心走位就行",
-			3.2, 1.6)
 
 
 func _clear_world() -> void:
@@ -726,6 +865,8 @@ func _physics_process(delta: float) -> void:
 		_stage_time += delta
 	_card_delay = maxf(_card_delay - delta, 0.0)
 	_check_boss()
+	if _gauntlet_left > 0:
+		_tick_gauntlet(delta)
 	_spawn_timer -= delta
 	if _spawn_timer <= 0.0:
 		_spawn_timer = lerpf(SPAWN_INTERVAL_EASY, SPAWN_INTERVAL_HARD, _pressure())
@@ -775,6 +916,10 @@ func _spawn_wave() -> void:
 	# 实测那 7 局的死法全是这样堆出来的。
 	# 停刷不会饿死破甲弹：_tick_breach 是独立计时，Boss 在场时直接把弹掉在玩家周围 180 处。
 	if _boss != null and is_instance_valid(_boss):
+		return
+	# 王座厅"只刷新 Boss"：这一段的压力全部来自守门人的招式。
+	# 再叠小怪就不是读招，是被推着走——和 Boss 战停刷是同一条理由。
+	if _gauntlet_left > 0:
 		return
 	# 等玩家挑门的这段也不刷：四扇门是"打完收工、慢慢选"的节拍，
 	# 脚下还在刷怪，那个节拍就变成了"一边挨打一边选"。
@@ -1025,6 +1170,10 @@ func _create_enemy(kind: int, big: bool, at: Vector2, minion: bool = false) -> v
 func _check_boss() -> void:
 	if not is_instance_valid(player):
 		return
+	# 王座厅的五位守门人由 _tick_gauntlet 按顺序放，不走"本章时间到"这条线。
+	# 不挡的话，王座厅的章节时钟一满就会额外再放一只，变成六位。
+	if _gauntlet_left > 0:
+		return
 	if _boss != null and is_instance_valid(_boss):
 		return
 	# 门开着的时候不能刷下一只 Boss：这段时间章节时钟仍在走，
@@ -1044,20 +1193,52 @@ func _spawn_boss() -> void:
 	# 改成"发数"之后，Boss 的血条等价于一张弹匣清单：
 	# 打得动打不动只取决于捡了几发，和卡片强度彻底解耦。
 	var shots: int = int(stage.get("breach_shots", 12))
-	var hp: float = Enemy.BREACH_HIT_DAMAGE * float(shots)
+	var boss_name: String = str(stage["boss"])
+	# 横幅只有一行，剧情台词和机制提示都得说，所以用"·"隔开。
+	# 机制提示不能删：不知道"它抬手浪就到了"的玩家会白挨一轮。
+	var beat: String = Story.boss_line(boss_name)
+	var hint: String = Stage.boss_hint(boss_name)
+	if not beat.is_empty() and not hint.is_empty():
+		beat = "%s　·　%s" % [beat, hint]
+	elif beat.is_empty():
+		beat = hint
+	_create_boss(boss_name, Enemy.BREACH_HIT_DAMAGE * float(shots), "", beat)
+
+
+## 王座厅的守门人。血量按名次涨（16/24/32/40/48 发，合计 160 发）。
+## 名字与台词来自 Story.GAUNTLET：前三位是前面见过的守门人，
+## 第四位是王子自己的影子，第五位是城堡本身——"越打越像自己"。
+func _spawn_gauntlet_boss() -> void:
+	if _gauntlet_index >= _gauntlet_total:
+		return
+	var info: Dictionary = Story.gauntlet(_gauntlet_index)
+	var boss_name: String = str(info["name"])
+	var shots: int = GAUNTLET_BASE_SHOTS + GAUNTLET_SHOT_STEP * _gauntlet_index
+	var beat: String = str(info["line"])
+	var hint: String = Stage.boss_hint(boss_name)
+	if not hint.is_empty():
+		beat = "%s　·　%s" % [beat, hint]
+	_create_boss(boss_name, Enemy.BREACH_HIT_DAMAGE * float(shots),
+		"%d/%d" % [_gauntlet_index + 1, _gauntlet_total], beat)
+	# 名次在这里推进，而不是在死亡结算里：死亡结算只管"还剩几位"，
+	# 两处都改的话，某次异常死亡会让名次跳号。
+	_gauntlet_index += 1
+
+
+## 造一只 Boss 并把它推进场。名字、血、名次、横幅台词是唯一的四个输入：
+## 普通关底和王座厅只在这四样上不同，其余（信号接线、入场保护、停刷、压场）
+## 必须一模一样。分开写两份的话，迟早出现"王座厅的 Boss 不播受击音"这种漏。
+func _create_boss(boss_name: String, hp: float, rank: String, beat: String) -> void:
 	var speed: float = (randf_range(ENEMY_SPEED_MIN, ENEMY_SPEED_MAX) \
 		+ minf(_elapsed * ENEMY_SPEED_GROWTH, ENEMY_SPEED_CAP) + THREAT_SPEED_BONUS * _threat()) * BOSS_SPEED_SCALE
-	var boss_name: String = str(stage["boss"])
-	# 招式风格跟着名字走，不跟着章号：无尽轮次会把这三只循环放出来，
-	# 玩家记住的是"潮主会拍浪"，而不是"第三章的 Boss 会什么"。
+	# 招式风格跟着名字走，不跟着章号：王座厅会把三只老面孔再放一遍，
+	# 玩家记住的是"潮主会拍浪"，而不是"第几幕的 Boss 会什么"。
 	var kit: int = Stage.boss_kit(boss_name)
 	var boss := Enemy.new()
 	boss.spawn_serial = _next_serial
 	_next_serial += 1
 	boss.configure_boss(hp, speed, boss_name, kit)
 	boss.target = player
-	# 壳的判定注入给 Boss 自己：Game 不在每个武器的伤害路径上做判断，
-	# 只在"这一发弹还在不在"这一件事上说话。
 	# 出场定身：Boss 从视野外走进来的那 1.1 秒不出招，
 	# 玩家需要用这一秒确认"它来了、它叫什么、血条在哪"。
 	boss.boss_intro_t = Enemy.BOSS_INTRO_TIME
@@ -1075,25 +1256,23 @@ func _spawn_boss() -> void:
 	boss.maze = maze
 	world.add_child(boss)
 	# 出现在普通刷怪环外侧 1.25 倍处：玩家看得见它从远处走进来，而不是凭空贴脸出现。
-	# 圈变小之后这个点会掉到毒里，所以同样要夹一次——Boss 不吃毒，但"从紫幕外走进来"
-	# 看着像逃课；夹在壁外侧 1.03R 处，它仍然从远处入画。
 	boss.global_position = _clamp_into_walkable(player.global_position + _spawn_offset(randf() * TAU) * 1.25)
 	boss.reset_physics_interpolation()
 	_enemies.append(boss)
 	_boss = boss
-	# 血条带风格名（潮主 · 潮汐）：三只 Boss 的招式不同，名字后面得跟上"它怎么打"
-	hud.show_boss(boss_name, Enemy.BOSS_KIT_NAMES[kit])
-	# 出场横幅只报"关底 + 它怎么威胁你"。同一时间换章横幅已经用掉了，
-	# 这里不写章节信息，只让玩家知道"接下来这一场是读招，不是拼血"。
+	# 血条带风格名（潮主 · 潮汐）。王座厅还要带名次：
+	# 玩家必须知道"还剩几位"，否则第五位出来时他会以为这是一只无限血的 Boss。
+	hud.show_boss(boss_name, Enemy.BOSS_KIT_NAMES[kit], rank)
 	if audio != null:
 		audio.play("boss_in")
 	if tutorial != null:
-		# 横幅已经说了"它是什么"，这里只补横幅没说、但必须知道的机制：
-		# 壳 + 窗口 + 回血。不知道"打不动"的玩家会以为游戏卡了；
+		# 横幅已经说了"它是谁、它怎么打"，这里只补横幅没说、但必须知道的机制：
+		# 壳 + 窗口。不知道"打不动"的玩家会以为游戏卡了；
 		# 不知道"只有窗口能打"的玩家会一直贴着它开枪，然后以为弹是坏的。
 		tutorial.notify("boss", "它有壳：普通攻击打不进 · 穿甲弹随时能打，还能把它打穿",
 			"", 3.8)
-	hud.show_banner("关底 · " + boss_name, Stage.boss_hint(boss_name), Stage.tint(_stage_index), false)
+	var prefix: String = "关底 · " if rank.is_empty() else "守门人 · "
+	hud.show_banner(prefix + boss_name, beat, Story.tint(_map_index), false)
 	# 立刻刷一次 HUD：章节条要当场变成"关底"，
 	# 等 10Hz 的节流刷新会有最多 0.1 秒的延迟，玩家会先看到 Boss 出场再看到条变红
 	_update_hud()
@@ -1104,6 +1283,23 @@ func _spawn_boss() -> void:
 	# 刷怪计时也归位。不归位的话，停刷的几十秒里它一路跑负，
 	# Boss 一死就是"满编一波 + 一地宝石"同时砸下来。
 	_spawn_timer = lerpf(SPAWN_INTERVAL_EASY, SPAWN_INTERVAL_HARD, _pressure())
+
+
+## 王座厅的出场节奏。上一只还在场就不放下一只——两只同屏会同时放弹幕，
+## 那是必死而不是难（和 _check_boss 里"两只 Boss 不共存"是同一条规矩）。
+func _tick_gauntlet(delta: float) -> void:
+	if _boss != null and is_instance_valid(_boss):
+		return
+	if _awaiting_portal:
+		return
+	if _gauntlet_left <= 0:
+		return
+	_gauntlet_delay = maxf(_gauntlet_delay - delta, 0.0)
+	if _gauntlet_delay > 0.0:
+		return
+	if is_instance_valid(player):
+		player.grant_invuln(1.2)
+	_spawn_gauntlet_boss()
 
 
 ## Boss 入场时把场上的普通怪压到 BOSS_ARENA_CAP 只。
@@ -1270,7 +1466,111 @@ func _on_boss_killed(at: Vector2) -> void:
 		# 无敌从"Boss 倒下的这一帧"开始算。这 3 秒玩家要做的是走过去捡宝石，
 		# 而不是一边躲残留一边捡——顺手捡的东西不该用命换。
 		player.grant_invuln(BOSS_GRACE_TIME)
+	# 王座厅：倒一位放下一场，五位移除完才开城门。
+	# 这里不能走"开四扇门"那条路径——王座厅没有下一幕，只有出口。
+	if _gauntlet_left > 0:
+		_gauntlet_left -= 1
+		if _gauntlet_left > 0:
+			_gauntlet_delay = GAUNTLET_GAP
+			hud.show_banner("守门人倒下", "还站着 %d 位" % _gauntlet_left,
+				Story.tint(Story.ACT_COUNT - 1), false)
+			_update_hud()
+			return
+		_open_final_portal(at)
+		return
 	_open_portals(at)
+
+
+## 最后一位守门人倒下：只开一扇门，而且不是"选择"，是"出口"。
+## 它开在尸体原地——玩家此刻就站在那儿，ARM_TIME 那 1.6 秒是留给他的
+## "先捡完这一地的宝石和弹"的时间。
+func _open_final_portal(at: Vector2) -> void:
+	_awaiting_portal = true
+	_spawn_timer = 0.0
+	var center: Vector2 = at
+	if maze != null:
+		center = maze.nearest_floor_point(at)
+	var portal := Portal.new()
+	portal.index = 0
+	portal.reward = Portal.Reward.VICTORY
+	portal.target = player
+	portal.request_enter.connect(_on_portal_requested)
+	world.add_child(portal)
+	portal.global_position = center
+	portal.reset_physics_interpolation()
+	_portals.append(portal)
+	if audio != null:
+		audio.play("clear")
+	hud.show_banner("西城门开了", "走出去，这一局就结束了", Color(1.0, 0.94, 0.72), true)
+	_update_hud()
+
+
+## 走进胜利门：结算、存档、给胜利面板。
+## 和死亡结算共用 Score 的同一套算法，只多一项"逃离奖励"——
+## 两套公式的话，玩家会算不清"到底哪种结局分高"。
+func _on_victory() -> void:
+	_victory = true
+	_cleared = true
+	_state = State.VICTORY
+	if audio != null:
+		audio.play("clear")
+	_sync_pause()
+	if touch != null:
+		touch.set_active(false)
+	hud.close_level_up()
+	hud.hide_boss()
+	hud.set_danger(0.0)
+
+	var breakdown: Dictionary = Score.compute(_kills, _elite_kills, _elapsed,
+		_level, _xp_total, true, true)
+	var outcome: Dictionary = ScoreBoard.submit(str(_profile.get("name", ScoreBoard.DEFAULT_NAME)), {
+		"score": int(breakdown["total"]),
+		"kills": _kills,
+		"elite_kills": _elite_kills,
+		"level": _level,
+		"xp_total": _xp_total,
+		"elapsed": _elapsed,
+		"stage": _map_index,
+		"cleared": true,
+		"victory": true,
+	})
+	_profile = outcome["profile"]
+	hud.set_score(str(_profile["name"]), int(breakdown["total"]), int(_profile["best"]["score"]))
+
+	var result: Dictionary = breakdown.duplicate()
+	result["kills"] = _kills
+	result["elite_kills"] = _elite_kills
+	result["boss_kills"] = _boss_kills
+	result["level"] = _level
+	result["xp_total"] = _xp_total
+	result["time_text"] = _time_text()
+	result["score"] = int(breakdown["total"])
+	result["profile"] = _profile
+	result["is_best"] = outcome["is_best"]
+	result["victory_points"] = int(breakdown.get("victory_points", 0))
+	result["acts"] = Story.ACT_COUNT
+	result["bosses"] = _gauntlet_total
+	hud.show_victory(result)
+
+
+## 进王座厅：换图、锁定"只放守门人"的模式。
+## 破甲弹先补 4 发：五位守门人合计要 80 发，掉率再快也需要时间，
+## 而从上一场带过来的余弹很可能已经见底——空手进王座厅等于直接判死。
+func _enter_final_hall() -> void:
+	_gauntlet_total = Story.gauntlet_count()
+	_gauntlet_left = _gauntlet_total
+	_gauntlet_index = 0
+	_gauntlet_delay = BANNER_READ_TIME + 0.8
+	_rebuild_map()
+	_breach += 4
+	if hud != null:
+		hud.set_breach(_breach)
+
+
+## "第 4/10 幕 · 镜厅"。确认面板与暂停面板都用它，
+## 拼串只写一处，才不会出现"暂停里写第 4 幕、面板里写第 4 图"。
+func _act_text(index: int) -> String:
+	return "%s · %s" % [Story.progress_text(index), Story.name_at(index)]
 
 
 ## 四扇门开在 Boss 尸体周围，扇形铺开。
@@ -1329,7 +1629,7 @@ func _open_portals(at: Vector2) -> void:
 	# 横幅要说"现在该干什么"。只说"Boss 已击败"等于把玩家扔在原地。
 	if audio != null:
 		audio.play("clear")
-	hud.show_banner("四扇门已开", "奖励越好的门，下一张图越难（+20% ~ +100%）",
+	hud.show_banner("四扇门已开", "奖励越好的门，下一幕越难（+20% ~ +100%）",
 		Stage.tint(_stage_index), true)
 
 
@@ -1342,10 +1642,11 @@ func _on_portal_requested(portal: Portal) -> void:
 	_pending_portal = portal
 	_state = State.CONFIRM
 	# 提示里给的是"走这扇门之后"的累计数值，不是增量：
-	# 玩家真正要判断的是"下一张图有多难"，"+40%" 单独看没有参照。
+	# 玩家真正要判断的是"下一幕有多难"，"+40%" 单独看没有参照。
+	var final: bool = portal.reward == Portal.Reward.VICTORY
 	var next_power: float = 1.0 + _floor_power + portal.difficulty()
-	hud.open_portal_confirm(portal.reward_text(), _map_index + 1,
-		int(round((next_power - 1.0) * 100.0)))
+	hud.open_portal_confirm(portal.reward_text(), _act_text(_map_index),
+		_act_text(_map_index + 1), int(round((next_power - 1.0) * 100.0)), final)
 	_sync_pause()
 
 
@@ -1358,19 +1659,37 @@ func _confirm_portal() -> void:
 	var reward: int = portal.reward
 	hud.clear_overlays()
 	_state = State.PLAYING
-	_sync_pause()
 	_awaiting_portal = false
 	for p in _portals:
 		if is_instance_valid(p) and p != portal:
 			p.queue_free()
 	_portals.clear()
 	portal.consume()
+	# 胜利门不是"下一张图"：它直接把这一局结算掉。
+	# 奖励和难度都不发——门外没有下一幕可拿。
+	if reward == Portal.Reward.VICTORY:
+		_on_victory()
+		return
 	_grant_portal_reward(reward)
 	_floor_power += portal.difficulty()
 	_floor += 1
 	_map_index += 1
-	_advance_stage()
-	_rebuild_map()
+	_portal_count += 1
+	# 第 PORTAL_LIMIT 扇门之后是王座厅。顺序：先推章节（换配色/发卡）、
+	# 再建地图、最后播剧情——剧情播完玩家睁眼就在新房间里。
+	var final_hall: bool = _portal_count >= PORTAL_LIMIT
+	_advance_stage(false)
+	if final_hall:
+		_enter_final_hall()
+	else:
+		_rebuild_map()
+	# 幕号直接用"第几道门"：第 1 道门之后是第二幕，第 9 道门之后是第十幕，
+	# 第 10 道门之后不是第十一幕——是终章。十幕 + 终章 + 10 道门，
+	# 三个数字必须能对上，否则玩家会在第 10 幕之后看到"第 11 幕"这种不存在的东西。
+	if final_hall:
+		_play_finale("final")
+	else:
+		_play_story(_portal_count, "portal")
 
 
 func _cancel_portal() -> void:
@@ -1448,7 +1767,7 @@ func _on_merchant_request(merchant: Merchant) -> void:
 		return
 	_merchant = merchant
 	_state = State.SHOP
-	hud.open_shop(_gold, _shop_stock)
+	hud.open_shop(_gold, _shop_stock, Story.merchant_line())
 	if audio != null:
 		audio.play("ui")
 	_sync_pause()
@@ -1487,7 +1806,7 @@ func _on_shop_buy(index: int) -> void:
 		audio.play("pickup")
 	# 整块重画：金币数、售罄状态都变了。局部改一个按钮要维护两套状态，
 	# 而这张面板每帧的刷新成本是零（它只在暂停时存在）。
-	hud.open_shop(_gold, _shop_stock)
+	hud.open_shop(_gold, _shop_stock, Story.merchant_line())
 
 
 func _close_shop() -> void:
@@ -1572,28 +1891,19 @@ func _rebuild_map() -> void:
 ## 关卡推进：击杀章节 Boss 就是"过了一关"。这里是 P2-8 的落点——
 ## 换配色、弹横幅、发一张卡，玩家能明确感到节奏翻页了，
 ## 而不是"又打了一只血多的怪"。
-func _advance_stage() -> void:
+func _advance_stage(show_banner: bool = true) -> void:
 	_stage_index += 1
 	_stage_time = 0.0
 	_apply_stage_look(Stage.at(_stage_index))
 	_card_delay = BANNER_READ_TIME
-
-	if not _cleared and Stage.is_cleared(_stage_index):
-		_cleared = true
-		if audio != null:
-			audio.play("clear")
-		hud.show_banner("通关 · 三章走完", "深渊没有底，但你已经在最深处站住了", Stage.tint(_stage_index), true)
-		if is_instance_valid(player):
-			# 通关把血补满：后面是无尽轮次，血量在这里清零等于把奖励变成了惩罚
-			player.heal(player.max_health)
-			player.add_trauma(0.8)
-		# 通关奖励两张卡，后续每章一张
-		_pending_cards += 2
-		_update_hud()
-		return
-
-	var stage: Dictionary = Stage.at(_stage_index)
-	hud.show_banner(Stage.title(_stage_index), str(stage["subtitle"]), Stage.tint(_stage_index), false)
+	# 界面上的"第几章"现在由剧情决定（Story），Stage 只管敌人构成、Boss 与配色。
+	# 老版本在这里判 Stage.is_cleared(index >= 3) 并弹"通关 · 三章走完"——
+	# 十幕之后那个判断会在第四幕就触发，把一局游戏提前宣判成通关，已经删掉。
+	# 现在的"通关"只有一个来源：王座厅五位守门人全部倒下（见 _on_victory）。
+	var act_index: int = mini(_map_index, Story.ACT_COUNT - 1)
+	if show_banner:
+		hud.show_banner(Story.title(act_index), Story.beat(act_index),
+			Story.tint(act_index), false)
 	_pending_cards += 1
 	_update_hud()
 
@@ -1904,6 +2214,8 @@ func _on_gem_collected(gem: XpGem, value: int) -> void:
 ## 每章"多久掉一枚"从 Stage 读，不在这里写死：三章的难度差异本来就该由章节表表达，
 ## 写在 Game 里的话，改一章就得回来翻这份代码。
 func _breach_interval() -> float:
+	if _gauntlet_left > 0:
+		return GAUNTLET_BREACH_EVERY
 	return float(Stage.at(_stage_index).get("breach_every", 4.5))
 
 
@@ -2315,7 +2627,10 @@ func _on_player_died() -> void:
 	result["score"] = breakdown["total"]
 	result["profile"] = _profile
 	result["is_best"] = outcome["is_best"]
-	# 关卡进度：结算面板要能回答"我这局走到哪了"，只给一个存活秒数是不够的
+	# 关卡进度：结算面板要能回答"我这局走到哪了"，只给一个存活秒数是不够的。
+	# 给的是幕号与幕名：十幕的一局里，"第 7 幕"才是玩家记得住的坐标。
+	result["act_index"] = mini(_map_index, Story.ACT_COUNT - 1)
+	result["act_name"] = Story.name_at(_map_index)
 	result["stage_index"] = _stage_index
 	result["stage_name"] = Stage.title(_stage_index)
 	result["cleared"] = _cleared
@@ -2357,6 +2672,20 @@ func _input(event: InputEvent) -> void:
 			if key_event.keycode >= KEY_1 and key_event.keycode <= KEY_9:
 				_choose(key_event.keycode - KEY_1)
 		State.GAME_OVER:
+			if key_event.keycode == KEY_R:
+				_restart()
+			elif key_event.keycode == KEY_P or key_event.keycode == KEY_ESCAPE:
+				_open_menu()
+		State.STORY:
+			# 空格 / 回车 继续；ESC / P 直接跳过（和右上角那颗按钮完全等价）。
+			# 两条路径都要有：键盘玩家会本能地按 ESC，而手机上只有那颗按钮。
+			if key_event.is_action_pressed("cast_skill") or key_event.keycode == KEY_ENTER:
+				if story_panel != null:
+					story_panel.advance()
+			elif key_event.keycode == KEY_ESCAPE or key_event.keycode == KEY_P:
+				if story_panel != null:
+					story_panel.skip()
+		State.VICTORY:
 			if key_event.keycode == KEY_R:
 				_restart()
 			elif key_event.keycode == KEY_P or key_event.keycode == KEY_ESCAPE:
@@ -2407,10 +2736,12 @@ func _mmss(seconds: float) -> String:
 func _map_text() -> String:
 	# 难度百分比直接写出来：+10% 的递增如果只藏在数值里，玩家永远感受不到"我在变强/敌人在变强"，
 	# 只会觉得"后面莫名其妙打不动了"。这个数字就是这条机制的可见面。
+	if _gauntlet_total > 0:
+		return "%s · %s" % [Story.finale_title(), _time_text()]
 	if _floor <= 0:
-		return "第 %d 图 · 探索 %s" % [_map_index + 1, _time_text()]
-	return "第 %d 图 · 敌 +%d%% · %s" % [
-		_map_index + 1, int(round((_power_scale() - 1.0) * 100.0)), _time_text()]
+		return "%s · 探索 %s" % [Story.progress_text(_map_index), _time_text()]
+	return "%s · 敌 +%d%% · %s" % [
+		Story.progress_text(_map_index), int(round((_power_scale() - 1.0) * 100.0)), _time_text()]
 
 
 ## 离玩家最近的一扇门的位移。没有门时返回零向量（箭头会自动隐藏）。
@@ -2438,7 +2769,14 @@ func _update_hud() -> void:
 		# 挑门期间进度条钉在满格：章节其实已经在 100%，只是还没翻页。
 		# 让它继续涨会把 1.0 之后的部分截掉，看起来像"卡住了"。
 		progress = 1.0
-	hud.set_stage(Stage.title(_stage_index), progress, boss_alive, Stage.tint(_stage_index))
+	# 界面上的幕名来自 Story，章节数据（敌人构成 / 长度 / Boss）来自 Stage。
+	# 两者分开：剧情可以改名字，但改名字不该影响刷什么怪。
+	if _gauntlet_left > 0 or _gauntlet_total > 0:
+		# 王座厅不是"第 11 幕"：十幕走完之后它是终章，幕号到此为止。
+		hud.set_stage(Story.finale_title(), 1.0, boss_alive, Story.finale_tint())
+	else:
+		var act_index: int = mini(_map_index, Story.ACT_COUNT - 1)
+		hud.set_stage(_act_text(act_index), progress, boss_alive, Story.tint(act_index))
 	# 时间放进来是为了让老玩家还能对表：章节推进多少秒是可变节奏，
 	# 但"我这局撑了多久"仍然是排行榜和手感的共同基准。
 	hud.set_stats("%s  Lv.%d    击杀 %d    时间 %s" % [HeroClass.NAMES[_hero], _level, _kills, _time_text()])

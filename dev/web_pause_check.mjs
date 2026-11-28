@@ -31,6 +31,8 @@ const DPR = 2;
 const S_MENU = 0;
 const S_PLAYING = 1;
 const S_LEVEL_UP = 2;
+// 剧情屏（State.STORY）。开局和每次穿门都会出现，按 ESC 跳过。
+const S_STORY = 7;
 
 const lines = [];
 const fails = [];
@@ -128,6 +130,14 @@ async function waitState(cdp, predicate, timeoutMs) {
 			// 本来该立刻通过的断言会被拖到超时。
 			if (s && s.state === S_LEVEL_UP) {
 				await cdp.press('1', 'Digit1', 49);
+				await sleep(250);
+				continue;
+			}
+			// 剧情屏（state=7）。同样的道理：它也会冻结整棵树，
+			// 而且不处理就会把"开局 2 秒内进 PLAYING"这条断言拖到超时。
+			// 按 ESC = 跳过整幕（和右上角那颗按钮等价）。
+			if (s && s.state === S_STORY) {
+				await cdp.press('Escape', 'Escape', 27);
 				await sleep(250);
 				continue;
 			}

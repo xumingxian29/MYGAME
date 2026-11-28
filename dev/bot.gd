@@ -75,7 +75,10 @@ var _tick: int = 0
 
 
 func _initialize() -> void:
-	_limit = _zone_cap() + 120.0
+	# 十幕 + 王座厅之后，一局完整逃亡可以到 15 分钟以上。
+	# 跑动上限一并抬到 900 秒：上限太低的话，"逃出"会被统计成"到时限"，
+	# 通关率就永远是 0，而这个版本唯一重要的新指标就是通关率。
+	_limit = maxf(_zone_cap() + 120.0, 900.0)
 	# idle（完全不动）作为下限只留两个种子：它必然在 60~80 秒死，多跑几局没有信息量，
 	# 却会把"总体中位数"拖到没有意义的低值。实战口径看两个 kite 策略。
 	#
@@ -145,6 +148,9 @@ func _physics_process(delta: float) -> bool:
 		if _game == null:
 			return false
 		_game._on_menu_started("bot", 0)
+		_game.story_enabled = false
+		if _game.story_panel != null and _game.story_panel.is_open():
+			_game.story_panel.skip()
 		_next_run()
 		return false
 
@@ -163,6 +169,20 @@ func _physics_process(delta: float) -> bool:
 	# bot 通过实例读枚举在 --script 模式下偶尔会拿到未初始化的类。
 	if _game._state == 5:
 		_game._confirm_portal()
+		return false
+
+	# 剧情（State.STORY = 7）。台架一律跳过：剧情是给人看的，
+	# 台架要量的是战斗时长，让 bot 一屏一屏点"继续"只会把 10 局变成 40 屏。
+	if _game._state == 7:
+		if _game.story_panel != null:
+			_game.story_panel.skip()
+		return false
+
+	# 胜利（State.VICTORY = 8）。走到这里说明这一局通关了，
+	# 记一笔"逃出"再开下一局——不然台架会把胜利当成卡死。
+	if _game._state == 8:
+		_summary("逃出")
+		_next_run()
 		return false
 
 	# 商店（State.SHOP = 6）。bot 一律只逛不买：
@@ -494,7 +514,11 @@ func _summary(reason: String) -> void:
 	var hp: float = _game.player.health if is_instance_valid(_game.player) else 0.0
 	# 死因由 game._death_cause 给（毒圈致死时是「圈外」，其余是「敌人」）。
 	# 到时限还活着 = 没死，单独记一类，否则会混进"敌人"里把分布看歪。
-	var cause: String = "未死" if reason == "到时限" else str(_game._death_cause)
+	var cause: String = str(_game._death_cause)
+	if reason == "逃出":
+		cause = "逃出"
+	elif reason == "到时限":
+		cause = "未死"
 	var zr: float = -1.0
 	if is_instance_valid(_game.player):
 		zr = _zone_ratio(_game.player.global_position, _zone())
@@ -602,6 +626,7 @@ func _aggregate() -> String:
 		var by_enemy: int = 0
 		var by_zone: int = 0
 		var never: int = 0
+		var escaped: int = 0
 		var ended_outside: int = 0
 		for r in _results:
 			if str(r["strategy"]) != s:
@@ -612,12 +637,14 @@ func _aggregate() -> String:
 					by_zone += 1
 				"未死":
 					never += 1
+				"逃出":
+					escaped += 1
 				_:
 					by_enemy += 1
 			if bool(r["outside"]):
 				ended_outside += 1
-		lines.append("%-13s 中位 %5.1fs  最短 %5.1fs  最长 %5.1fs  敌人 %d / 圈外 %d / 未死 %d  终局在圈外 %d" % [
-			s, _median(walls), walls.min(), walls.max(), by_enemy, by_zone, never, ended_outside,
+		lines.append("%-13s 中位 %5.1fs  最短 %5.1fs  最长 %5.1fs  敌人 %d / 圈外 %d / 未死 %d / 逃出 %d  终局在圈外 %d" % [
+			s, _median(walls), walls.min(), walls.max(), by_enemy, by_zone, never, escaped, ended_outside,
 		])
 	var timeout: int = 0
 	var zone_deaths: int = 0
@@ -640,4 +667,11 @@ func _aggregate() -> String:
 		_median(all_wall), all_wall.max() if not all_wall.is_empty() else 0.0, timeout, _zone_cap(), over_cap,
 	])
 	lines.append("死因：圈外致死 %d/%d 局 = %.0f%%（目标 15%%-35%% 之间）" % [zone_deaths, deaths, zone_pct])
+	var escaped_total: int = 0
+	for r in _results:
+		if str(r["cause"]) == "逃出":
+			escaped_total += 1
+	lines.append("通关：%d/%d 局逃出城堡 = %.0f%%" % [
+		escaped_total, _results.size(), 100.0 * float(escaped_total) / float(maxi(_results.size(), 1)),
+	])
 	return String("\n").join(lines)

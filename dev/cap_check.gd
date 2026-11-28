@@ -36,6 +36,9 @@ func _run() -> void:
 	root.add_child(game)
 	await process_frame
 	game._on_menu_started("探针", HeroClass.WARRIOR)
+	game.story_enabled = false
+	if game.story_panel != null and game.story_panel.is_open():
+		game.story_panel.skip()
 	await process_frame
 
 	print("\n[下限口径]")
@@ -52,6 +55,10 @@ func _run() -> void:
 			game.player.global_position + Vector2(cos(a), sin(a)) * randf_range(120.0, 300.0))
 	var made: int = game._enemies.size()
 	_check("造出 70 只", made >= 60, "实际 %d" % made)
+
+	# 把刷怪计时推远：不推的话这 0.5 秒里还会再刷一波，
+	# 量到的是"刷怪速度 vs 驱逐速度"，而不是上限本身（这条曾经偶发 41/49）。
+	game._spawn_timer = 9999.0
 
 	# 0.25 秒节流 + 一帧执行，推进 0.5 秒足够触发两轮
 	for i in range(30):

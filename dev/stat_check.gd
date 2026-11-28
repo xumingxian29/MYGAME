@@ -72,6 +72,9 @@ func _test_cards() -> void:
 	await process_frame
 	# 射手：远程武器可用，弹道属性有意义
 	game._on_menu_started("上限探针", HeroClass.RANGER)
+	game.story_enabled = false
+	if game.story_panel != null and game.story_panel.is_open():
+		game.story_panel.skip()
 	await process_frame
 
 	var bullet: BulletWeapon = game.player.bullet_weapon

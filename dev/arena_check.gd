@@ -56,6 +56,9 @@ func _run() -> void:
 	root.add_child(game)
 	await process_frame
 	game._on_menu_started("探针", HeroClass.WARRIOR)
+	game.story_enabled = false
+	if game.story_panel != null and game.story_panel.is_open():
+		game.story_panel.skip()
 	await process_frame
 
 	print("\n[入场退场]")

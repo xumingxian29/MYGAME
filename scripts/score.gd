@@ -18,22 +18,30 @@ const PER_XP: int = 2
 ## 所以给一个"能看出来、但不至于让没通关的人白玩"的量级：
 ## 通关局的总分通常在 8000~15000，2500 是明显的加成而不是决定性差距。
 const CLEAR_BONUS: int = 2500
+## 逃出城堡（十幕 + 五位守门人）的奖励。
+## 一局完整逃亡大约 10~18 分钟、十几场 Boss 战，正常总分在 20000~40000；
+## 8000 是"看得出这是另一种结局"，又不至于让一次幸运的短局追上它。
+const VICTORY_BONUS: int = 8000
 
 
 ## 单项拆解，供结算面板逐行展示。
-static func compute(kills: int, elite_kills: int, elapsed: float, level: int, xp_total: int, cleared: bool = false) -> Dictionary:
+static func compute(kills: int, elite_kills: int, elapsed: float, level: int, xp_total: int,
+		cleared: bool = false, victory: bool = false) -> Dictionary:
 	var elites: int = clampi(elite_kills, 0, kills)
 	var normal: int = maxi(kills - elites, 0)
 	var kill_points: int = normal * KILL_NORMAL + elites * KILL_ELITE
 	var time_points: int = int(elapsed) * PER_SECOND
 	var growth_points: int = maxi(level - 1, 0) * PER_LEVEL + maxi(xp_total, 0) * PER_XP
-	var clear_points: int = CLEAR_BONUS if cleared else 0
+	# 胜利取代通关奖励，而不是叠加：两者是同一件事的两个阶段，
+	# 叠加的话"逃出去"会变成"通关奖金 + 逃离奖金"，数字上说不清。
+	var clear_points: int = VICTORY_BONUS if victory else (CLEAR_BONUS if cleared else 0)
 	return {
 		"total": kill_points + time_points + growth_points + clear_points,
 		"kill_points": kill_points,
 		"time_points": time_points,
 		"growth_points": growth_points,
 		"clear_points": clear_points,
+		"victory_points": clear_points if victory else 0,
 		"normal_kills": normal,
 		"elite_kills": elites,
 	}

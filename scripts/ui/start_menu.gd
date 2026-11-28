@@ -76,14 +76,22 @@ func _build() -> void:
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_box.add_child(title)
 
-	var subtitle := UiKit.label("选择职业 · 躲避怪潮 · 升级强化", 13, Color(0.68, 0.76, 0.9))
+	var subtitle := UiKit.label("王子 · 黑暗城堡 · 十道门", 13, Color(0.72, 0.80, 0.94))
 	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_box.add_child(subtitle)
+
+	# 剧情的第一句放在菜单里。玩家点"开始"之前就该知道自己是王子、
+	# 被关在城堡里——否则第一屏剧情会像是另一个游戏的开场。
+	var premise := UiKit.label(Story.prologue(), 12, Color(0.74, 0.68, 0.84))
+	premise.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	premise.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	premise.custom_minimum_size = Vector2(PANEL_WIDTH - 44, 0)
+	_box.add_child(premise)
 
 	# 一局的结构直接写在这里，而不是塞一段教程：玩家在菜单停留的时间最长，
 	# 一行字就能回答"这游戏要打到哪一步算赢"。没有这句话时，
 	# 试玩反馈里"规则不清晰"说的正是"不知道自己在往哪打"。
-	var route := UiKit.label("三章 · 每章关底一只 Boss · 走完三章进入无尽", 12, Color(0.6, 0.74, 0.68))
+	var route := UiKit.label("穿过十道门 · 王座厅连战五位守门人 · 走出西门即逃离", 12, Color(0.6, 0.74, 0.68))
 	route.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_box.add_child(route)
 

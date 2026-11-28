@@ -29,6 +29,9 @@ func _process(_delta: float) -> bool:
 		if _game == null:
 			return false
 		_game._on_menu_started("引导截图", HeroClass.RANGER)
+		_game.story_enabled = false
+		if _game.story_panel != null and _game.story_panel.is_open():
+			_game.story_panel.skip()
 		# 截图为的是看"新玩家第一局"，所以要把历史清掉，否则提示不会出现
 		_game.tutorial.clear_history()
 		return false

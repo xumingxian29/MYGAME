@@ -43,6 +43,9 @@ func _run() -> void:
 	root.add_child(game)
 	await process_frame
 	game._on_menu_started("探针", HeroClass.WARRIOR)
+	game.story_enabled = false
+	if game.story_panel != null and game.story_panel.is_open():
+		game.story_panel.skip()
 	await process_frame
 
 	print("\n[开局]")
@@ -124,3 +127,52 @@ func _run() -> void:
 	_check("返回后 HUD 已隐藏", game.hud._root.visible == false)
 	_check("返回后暂停面板不可见", game.hud._pause_panel.visible == false)
 	_check("返回后按钮文字复位", game.hud._pause_btn.text == "暂停", game.hud._pause_btn.text)
+
+	print("\n[手机逻辑分辨率 960x540]")
+	# 触屏的逻辑分辨率是 960x540，桌面是 1280x720——同一块结算面板，
+	# 在手机上能用的高度少 180。桌面版 587 高的胜利面板搬到手机上，
+	# 底部两个按钮会被屏幕下边缘切掉（渲染截图里量到的，不是估计）。
+	# 这里把视口切成手机尺寸，验证两块结算面板都还装得下。
+	# headless 的窗口是方形的，用 expand 缩放反而会把视口撑成 960x960（测不出问题）。
+	# 这里改成 keep，让视口严格等于手机的逻辑分辨率 960x540。
+	root.content_scale_aspect = Window.CONTENT_SCALE_ASPECT_KEEP
+	root.content_scale_size = Vector2i(960, 540)
+	game.hud.set_touch_mode(true)
+	game._on_menu_started("手机", HeroClass.WARRIOR)
+	await process_frame
+	var vp: Vector2 = root.get_visible_rect().size
+	_check("视口已切成手机尺寸", absf(vp.y - 540.0) < 2.0, "%.0fx%.0f" % [vp.x, vp.y])
+
+	game._map_index = 9
+	game._gauntlet_total = 5
+	game._boss_kills = 5
+	game._elapsed = 823.0
+	game._kills = 612
+	game._level = 34
+	game._on_victory()
+	await process_frame
+	await process_frame
+	var vr: Rect2 = game.hud._panel.get_global_rect()
+	# 要求四周留 10px 边距，而不是"勉强没超出去"：贴着屏幕下沿的按钮，
+	# 在有圆角的手机上会被啃掉一截。挤到贴边的版本（523 高）在这条上会挂。
+	_check("胜利面板装得下手机高度且留边", vr.position.y >= 10.0 and vr.end.y <= vp.y - 10.0,
+		"panel=%.0f..%.0f vp=%.0f" % [vr.position.y, vr.end.y, vp.y])
+	_check("胜利面板没超出手机宽度", vr.position.x >= -1.0 and vr.end.x <= vp.x + 1.0,
+		"panel=%.0f..%.0f vp=%.0f" % [vr.position.x, vr.end.x, vp.x])
+	var action_ok: bool = true
+	var action_detail: String = ""
+	for node in game.hud._panel.find_children("*", "Button", true, false):
+		var br: Rect2 = (node as Button).get_global_rect()
+		if br.end.y > vp.y + 1.0 or br.position.y < -1.0:
+			action_ok = false
+			action_detail += "%s@%.0f..%.0f " % [(node as Button).text, br.position.y, br.end.y]
+	_check("胜利面板的两个按钮都在屏幕内", action_ok, action_detail)
+
+	game._on_menu_started("手机", HeroClass.WARRIOR)
+	await process_frame
+	game._on_player_died()
+	await process_frame
+	await process_frame
+	var gr: Rect2 = game.hud._panel.get_global_rect()
+	_check("死亡面板装得下手机高度且留边", gr.position.y >= 10.0 and gr.end.y <= vp.y - 10.0,
+		"panel=%.0f..%.0f vp=%.0f" % [gr.position.y, gr.end.y, vp.y])

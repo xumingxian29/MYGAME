@@ -12,10 +12,15 @@ extends RefCounted
 ##     "小明": {
 ##       "best": {score, kills, elite_kills, level, xp_total, elapsed, date},
 ##       "runs": 3,
-##       "total_kills": 128
+##       "total_kills": 128,
+##       "victories": 1,                                    # 逃出城堡的次数
+##       "best_victory": {score, elapsed, date}             # 最快的一次逃亡
 ##     }
 ##   }
 ## }
+##
+## 旧存档没有 victories / best_victory 两个字段：全部按 0 读，
+## 写回时自然补齐。不做版本迁移——这两个是纯增量，缺了不影响任何已有数据。
 ##
 ## 昵称直接作为 JSON key，所以不需要为文件名做转义。
 
@@ -84,6 +89,8 @@ static func load_profile(raw: String) -> Dictionary:
 		"best": _normalize_best(entry.get("best", {})),
 		"runs": int(entry.get("runs", 0)),
 		"total_kills": int(entry.get("total_kills", 0)),
+		"victories": int(entry.get("victories", 0)),
+		"best_victory": _normalize_victory(entry.get("best_victory", {})),
 	}
 
 
@@ -104,10 +111,29 @@ static func submit(raw: String, run: Dictionary) -> Dictionary:
 		best = _normalize_best(run)
 		best["date"] = Time.get_datetime_string_from_system(false, true)
 
+	# 胜利只在"真的走出城门"这一局加一。它是这一版的长期目标：
+	# 分数每次都会刷，但"第几次逃出去"只涨不跌，菜单上要靠它区分老玩家。
+	var victory: bool = bool(run.get("victory", false))
+	var victories: int = int(entry.get("victories", 0))
+	var best_victory: Dictionary = _normalize_victory(entry.get("best_victory", {}))
+	if victory:
+		victories += 1
+		# "最快的一次逃亡"按用时比，不看分数：分数会被卡牌运气拉偏，
+		# 用时才是玩家真正会去追的那个数。
+		var elapsed: float = float(run.get("elapsed", 0.0))
+		if float(best_victory["elapsed"]) <= 0.0 or elapsed < float(best_victory["elapsed"]):
+			best_victory = {
+				"score": int(run.get("score", 0)),
+				"elapsed": elapsed,
+				"date": Time.get_datetime_string_from_system(false, true),
+			}
+
 	players[key] = {
 		"best": best,
 		"runs": int(entry.get("runs", 0)) + 1,
 		"total_kills": int(entry.get("total_kills", 0)) + int(run.get("kills", 0)),
+		"victories": victories,
+		"best_victory": best_victory,
 	}
 	data["players"] = players
 	data["last_player"] = key
@@ -131,6 +157,7 @@ static func list_players() -> Array[Dictionary]:
 			"kills": int(best["kills"]),
 			"runs": int(entry.get("runs", 0)),
 			"total_kills": int(entry.get("total_kills", 0)),
+			"victories": int(entry.get("victories", 0)),
 			"date": str(best["date"]),
 		})
 	out.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
@@ -205,6 +232,16 @@ static func _write(data: Dictionary) -> void:
 		return
 	file.store_string(JSON.stringify(data, "\t"))
 	file.close()
+
+
+## 胜利档：只有三个数。它是"最快逃亡"的记录，不是分数榜的副本。
+static func _normalize_victory(raw: Variant) -> Dictionary:
+	var src: Dictionary = raw if typeof(raw) == TYPE_DICTIONARY else {}
+	return {
+		"score": int(src.get("score", 0)),
+		"elapsed": float(src.get("elapsed", 0.0)),
+		"date": str(src.get("date", "")),
+	}
 
 
 ## JSON 里的数字都会变成 float，统一转回目标类型，避免界面出现 4877.0

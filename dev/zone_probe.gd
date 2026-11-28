@@ -129,6 +129,9 @@ func _test_wiring() -> void:
 	root.add_child(game)
 	await process_frame
 	game._on_menu_started("探针", HeroClass.WARRIOR)
+	game.story_enabled = false
+	if game.story_panel != null and game.story_panel.is_open():
+		game.story_panel.skip()
 	await process_frame
 
 	var zone: Zone = game.zone
@@ -207,6 +210,9 @@ func _test_shots() -> void:
 	root.add_child(game)
 	await process_frame
 	game._on_menu_started("探针", HeroClass.WARRIOR)
+	game.story_enabled = false
+	if game.story_panel != null and game.story_panel.is_open():
+		game.story_panel.skip()
 	await process_frame
 	var zone: Zone = game.zone
 	for t in _shot_times():
@@ -235,6 +241,9 @@ func _test_lethal() -> void:
 	root.add_child(game)
 	await process_frame
 	game._on_menu_started("探针", HeroClass.WARRIOR)
+	game.story_enabled = false
+	if game.story_panel != null and game.story_panel.is_open():
+		game.story_panel.skip()
 	await process_frame
 
 	var zone: Zone = game.zone

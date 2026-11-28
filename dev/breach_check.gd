@@ -267,11 +267,26 @@ func _test_table() -> void:
 		stage_total, fight_total, stage_total + fight_total, zone_cap, slack,
 	], slack >= 20.0, "余量只有 %.0fs，第三章的 Boss 会在圈归零后出现" % slack)
 
-	# 无尽轮次要更难，且不能把表里缺字段的旧章节拖崩
+	# 第四幕起的发数**不再逐幕上涨**。十幕 + 王座厅的一局里，
+	# 每幕 +4 发、掉率每幕慢 0.6 秒，到第 10 幕就是"60 发 × 4.4 秒 = 四分钟一场"，
+	# 一场就把整局拖垮。后期的难度交给 _floor_power（逐门 +20%~+100%），
+	# Boss 的血量只由"发数"决定——两条压力不该再叠。
 	var endless: Dictionary = Stage.at(Stage.COUNT)
-	_check("无尽轮次的发数高于第三章",
-		int(endless["breach_shots"]) > int(Stage.at(Stage.COUNT - 1)["breach_shots"]),
+	_check("第四幕的破甲需求与第三章持平",
+		int(endless["breach_shots"]) == int(Stage.at(Stage.COUNT - 1)["breach_shots"]),
 		"%d vs %d" % [int(endless["breach_shots"]), int(Stage.at(Stage.COUNT - 1)["breach_shots"])])
+	# 掉率也不能逐幕变慢：单场时长 = 发数 × 掉率 × 0.6，两个乘数一起涨就是平方。
+	_check("第四幕的掉率与第三章持平",
+		is_equal_approx(float(endless["breach_every"]),
+			float(Stage.at(Stage.COUNT - 1)["breach_every"])),
+		"%.2f vs %.2f" % [float(endless["breach_every"]), float(Stage.at(Stage.COUNT - 1)["breach_every"])])
+	# 单场时长上限：十幕之后每一场都要落在 25~50 秒，否则一局打不完
+	var worst: float = 0.0
+	for i in range(Stage.COUNT - 1, 11):
+		var shots: int = int(Stage.at(i).get("breach_shots", 12))
+		var every: float = float(Stage.at(i).get("breach_every", 4.5))
+		worst = maxf(worst, float(shots) * every * 0.6)
+	_check("第 3~11 幕的 Boss 单场都不超过 50 秒", worst <= 50.0, "最长 %.1fs" % worst)
 
 
 # ---------------------------------------------------------------- 接线
@@ -283,6 +298,9 @@ func _test_wiring() -> void:
 	root.add_child(game)
 	await process_frame
 	game._on_menu_started("探针", HeroClass.WARRIOR)
+	game.story_enabled = false
+	if game.story_panel != null and game.story_panel.is_open():
+		game.story_panel.skip()
 	await process_frame
 
 	_check("开局破甲弹为 0", game._breach == 0)

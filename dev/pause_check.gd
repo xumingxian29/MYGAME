@@ -56,6 +56,9 @@ func _process(_delta: float) -> bool:
 		0:
 			# 基线：没在跑的话后面所有暂停断言都没意义
 			_game._on_menu_started("check", HeroClass.WARRIOR)
+			_game.story_enabled = false
+			if _game.story_panel != null and _game.story_panel.is_open():
+				_game.story_panel.skip()
 			_check("开局后进入 PLAYING", _game._state == 1, "state=%d" % _game._state)
 			_check("开局后没有暂停", not paused, "paused=true")
 			_check("开局时没有外部原因", _has("portrait") == false and _has("hidden") == false, _reasons())
@@ -141,6 +144,9 @@ func _process(_delta: float) -> bool:
 			# 开局那行不能把 paused 硬写 false
 			_game._on_web_pause(["hidden", 1])
 			_game._on_menu_started("check", HeroClass.MAGE)
+			_game.story_enabled = false
+			if _game.story_panel != null and _game.story_panel.is_open():
+				_game.story_panel.skip()
 			_check("后台开局仍冻结", paused, "paused=false —— 玩家没看见就挨打了")
 			_check("后台开局 _state 是 PLAYING", _game._state == 1, "state=%d" % _game._state)
 			_game._on_web_pause(["hidden", 0])

@@ -78,6 +78,9 @@ func _process(delta: float) -> bool:
 		if _game == null:
 			return false
 		_game._on_menu_started("bot", 0)
+		_game.story_enabled = false
+		if _game.story_panel != null and _game.story_panel.is_open():
+			_game.story_panel.skip()
 		_next_run()
 		return false
 

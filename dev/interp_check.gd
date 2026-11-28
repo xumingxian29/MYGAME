@@ -41,6 +41,9 @@ func _process(_delta: float) -> bool:
 			return false
 		# 不点开局的话 _state 永远是 MENU，后面的运行时断言全部走不到
 		_game._on_menu_started("check", 0)
+		_game.story_enabled = false
+		if _game.story_panel != null and _game.story_panel.is_open():
+			_game.story_panel.skip()
 		return false
 
 	if _game._state == 2:

@@ -221,6 +221,9 @@ func _process(_delta: float) -> bool:
 		if _game == null:
 			return false
 		_game._on_menu_started("bosscheck", HeroClass.WARRIOR)
+		_game.story_enabled = false
+		if _game.story_panel != null and _game.story_panel.is_open():
+			_game.story_panel.skip()
 		_wait = 5
 		return false
 	if _wait > 0:
