@@ -30,6 +30,7 @@ const DPR = 2;
 // Godot 的 State 枚举
 const S_MENU = 0;
 const S_PLAYING = 1;
+const S_LEVEL_UP = 2;
 
 const lines = [];
 const fails = [];
@@ -90,6 +91,16 @@ class Cdp {
 		await sleep(60);
 		await this.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base });
 	}
+	/**
+	 * 按一次键。选卡面板吃的是 Godot 的键盘输入，不是 DOM 点击——
+	 * 用键而不是点坐标：卡片位置随视口和缩放变，坐标写死过两次，换分辨率就点空。
+	 */
+	async press(key, code, keyCode) {
+		const base = { key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode };
+		await this.send('Input.dispatchKeyEvent', { type: 'keyDown', ...base, text: key });
+		await sleep(50);
+		await this.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+	}
 }
 
 /** 读引擎回写的状态。引擎没起来时返回 null。 */
@@ -109,6 +120,17 @@ async function waitState(cdp, predicate, timeoutMs) {
 		try {
 			const s = await readState(cdp);
 			if (s && predicate(s)) return s;
+			// 升级选卡（state=2）自己也会把树暂停，和"竖屏/后台"是两回事。
+			// 以前这条脚本能过，是因为第一张卡要很久才来；经验翻倍后 14 秒就到 Lv.2，
+			// 后面的"横屏恢复"全被这张卡挡住，报出来的失败是假的。
+			// 处理方式与台架 bot 一致：看到选卡就按 1 选第一张，继续测暂停。
+			// 顺序不能反：先判 predicate 再按键——等"已暂停"时按键是白按，
+			// 本来该立刻通过的断言会被拖到超时。
+			if (s && s.state === S_LEVEL_UP) {
+				await cdp.press('1', 'Digit1', 49);
+				await sleep(250);
+				continue;
+			}
 		} catch (e) { /* 导航中上下文会被替换 */ }
 		await sleep(150);
 	}
@@ -325,7 +347,8 @@ async function main() {
 		screenOrientation: { type: 'portraitPrimary', angle: 0 },
 	});
 	await sleep(900);
-	const desk = await readState(cdp);
+	// 同样要放过一次可能的升级选卡：那一刻 paused=true 是卡片挡的，不是竖屏挡的
+	const desk = (await waitState(cdp, (s) => s.paused === false, 3000)) || (await readState(cdp));
 	const deskCopy = await cdp.evaluate(COPY_PROBE);
 	check('桌面竖窗口：不暂停', desk && desk.paused === false, desk ? 'paused=' + desk.paused : 'null');
 	check('桌面竖窗口：不显示横屏提示', deskCopy.display === 'none', 'display=' + deskCopy.display);

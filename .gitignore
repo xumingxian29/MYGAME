@@ -16,4 +16,5 @@ build/
 .workbuddy/backup/
 .workbuddy/backup-*/
 .workbuddy/*.bak-*
+.workbuddy/edge-profile/
 .wbapp_*.genie
