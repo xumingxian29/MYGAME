@@ -11,6 +11,7 @@ build/
 
 # 自检残留（可重新生成，不属于游戏内容）
 .workbuddy/*.txt
+.workbuddy/*.log
 .workbuddy/*.png
 .workbuddy/backup/
 .workbuddy/backup-*/
