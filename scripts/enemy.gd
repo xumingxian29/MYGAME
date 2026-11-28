@@ -439,7 +439,7 @@ func _move_toward(dir: Vector2, delta: float, speed_scale: float = 1.0) -> void:
 	var to: Vector2 = global_position + steer * _current_speed() * speed_scale * delta
 	if maze != null:
 		to = maze.constrain(global_position, to, radius)
-	global_position = to
+	global_position = to  # interp-ok: 连续位移（+= 的等价写法，to 由上一步推出来）
 
 
 func _touch(dist: float, damage: float) -> void:

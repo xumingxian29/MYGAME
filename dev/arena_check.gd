@@ -149,19 +149,29 @@ func _run() -> void:
 	_check("走完回到 1.0", is_equal_approx(game._spawn_density(), 1.0),
 		"实际 %.2f" % game._spawn_density())
 
-	# 数量层面也验一次：晚期一波 7 只（WAVE_GROWTH_SECONDS 55），新章开场该只出 4 只
+	# 数量层面也验一次。现在每波只数 = 1 + 深度加成 + 章内秒数/36，封顶 7：
+	#   第 10 幕开场（深度 +2、章内 0 秒）= 3 只，密度斜坡把它砍到 2 只
+	#   第 10 幕章末（章内 180 秒）= 1+2+5 = 8 → 封顶 7 只
+	# 按 _elapsed 算的老公式在 30 分钟一局里会给出 30 只/波。
 	game._boss_grace = 0.0
+	game._stage_index = 9
 	_clear_enemies(game)
-	game._elapsed = 350.0
+	game._elapsed = 1600.0
 	game._stage_time = 0.0
 	game._spawn_wave()
-	_check("晚期新章开场每波 4 只（满密度是 7 只）", game._enemies.size() == 4,
+	_check("第 10 幕开场每波 2 只（3 只 × 密度 0.5）", game._enemies.size() == 2,
 		"实际 %d" % game._enemies.size())
 
 	_clear_enemies(game)
 	game._stage_time = Stage.INTRO_TIME
 	game._spawn_wave()
-	_check("斜坡走完后每波回到 7 只", game._enemies.size() == 7,
+	_check("斜坡走完后第 10 幕每波 3 只", game._enemies.size() == 3,
+		"实际 %d" % game._enemies.size())
+
+	_clear_enemies(game)
+	game._stage_time = 180.0
+	game._spawn_wave()
+	_check("第 10 幕章末封顶 7 只（不是 30 只）", game._enemies.size() == 7,
 		"实际 %d" % game._enemies.size())
 
 

@@ -954,7 +954,11 @@ func show_game_over(result: Dictionary) -> void:
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(title)
 
-	var who := _make_label("玩家 %s" % str(profile["name"]), _panel_f(15), Color(0.78, 0.85, 0.96))
+	# 难度并进"玩家"这一行而不是另起一行：结算面板在 844×390 手机上高度已经贴边，
+	# 每多一行都要重排一次留边。玩家看到"轻松"两个字就够了，不需要整段说明。
+	var who := _make_label("玩家 %s · %s" % [
+		str(profile["name"]), Difficulty.name_of(int(result.get("difficulty", Difficulty.NORMAL))),
+	], _panel_f(15), Color(0.78, 0.85, 0.96))
 	who.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(who)
 
@@ -1066,9 +1070,10 @@ func show_victory(result: Dictionary) -> void:
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(title)
 
-	var sub := _make_label("第 %d 幕 · 王座厅　·　守门人 %d/%d" % [
+	var sub := _make_label("第 %d 幕 · 王座厅　·　守门人 %d/%d · %s" % [
 		int(result.get("acts", Story.ACT_COUNT)), int(result.get("bosses", 0)),
 		int(result.get("bosses", 0)),
+		Difficulty.name_of(int(result.get("difficulty", Difficulty.NORMAL))),
 	], _panel_f(14), Color(0.86, 0.88, 0.96))
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(sub)

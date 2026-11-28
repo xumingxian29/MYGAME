@@ -144,14 +144,16 @@ async function main() {
 	check('canvas 填满视口', geo.canvas && Math.abs(geo.canvas.w - geo.vw) < 2 && Math.abs(geo.canvas.h - geo.vh) < 2,
 		JSON.stringify(geo.canvas));
 
-	// 点「开始游戏」。(348,284) 是按 844x390 实测标定的中心（扫描全屏得到
-	// (315,272) 落在按钮内，2x 截图换算下来中心约 (350,284)），再给一圈网格兜底。
+	// 点「开始游戏」。菜单压缩后面板高度固定、内容包在 ScrollContainer 里，
+	// 按钮位置随内容变化——写死 (348,284) 已经翻车过一次（难度行上线后点空）。
+	// 改为网格扫描：844x390 实测按钮可点区约 x 264~420 / y 254~277（CSS），
+	// 35×11 的网格必落其中；扫描可能顺带切了难度/点了随机昵称，对本组断言没有影响。
 	let started = null;
 	const hits = [];
-	for (const dy of [-8, 0, 8]) for (const dx of [-30, 0, 30]) hits.push([348 + dx, 284 + dy]);
+	for (let y = 254; y <= 276; y += 11) for (let x = 270; x <= 410; x += 35) hits.push([x, y]);
 	for (const [px, py] of hits) {
 		await cdp.click(px, py);
-		started = await waitState(cdp, (s) => s.state !== S_MENU, 1500);
+		started = await waitState(cdp, (s) => s.state !== S_MENU, 800);
 		if (started) { log(`  用 (${px}, ${py}) 点进了游戏`); break; }
 	}
 	check('点开始进了游戏', started !== null, started ? 'state=' + started.state : '九宫格全部点空');

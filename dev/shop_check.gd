@@ -151,7 +151,7 @@ func _run() -> void:
 	print("\n[价格随层数上涨 + 后期固定回血]")
 	# 第 1 图：基准价 1600
 	game._floor = 0
-	game._floor_power = 0.0
+	game._gate_bias = 1.0
 	game._shop_stock_reset()
 	_check("第 1 图药价 1600", int(game._shop_stock[0]["price"]) == 1600,
 		"%d" % int(game._shop_stock[0]["price"]))

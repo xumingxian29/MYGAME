@@ -8,6 +8,7 @@ extends RefCounted
 ## {
 ##   "version": 2,
 ##   "last_player": "小明",              # 下次开局默认填入的昵称
+##   "last_difficulty": 0,              # 上次选的难度档（设备级偏好，不跟昵称绑定）
 ##   "players": {
 ##     "小明": {
 ##       "best": {score, kills, elite_kills, level, xp_total, elapsed, date},
@@ -182,6 +183,20 @@ static func last_player() -> String:
 	return sanitize(str(_read().get("last_player", DEFAULT_NAME)))
 
 
+## 上次选的难度。旧存档没有这个字段：按 Difficulty.DEFAULT（轻松）读，
+## 写回时自然补齐。不做版本迁移——纯增量，缺了不影响任何已有数据。
+## 难度是"这台机器怎么玩"的偏好，不是某个玩家的战绩，所以放在顶层而不是 players 里；
+## 换昵称不该把难度重置回默认值。
+static func last_difficulty() -> int:
+	return Difficulty.clamp_index(int(_read().get("last_difficulty", Difficulty.DEFAULT)))
+
+
+static func set_last_difficulty(index: int) -> void:
+	var data := _read()
+	data["last_difficulty"] = Difficulty.clamp_index(index)
+	_write(data)
+
+
 # ---------------------------------------------------------------- 读写
 
 static func _read() -> Dictionary:
@@ -203,6 +218,8 @@ static func _read() -> Dictionary:
 		data["players"] = {}
 	if typeof(data.get("last_player")) != TYPE_STRING:
 		data["last_player"] = DEFAULT_NAME
+	# 难度缺省按 DEFAULT 读即可，这里不写回：_read 只是归一化读路径，
+	# 强写会让"只读一次存档"也产生一次磁盘写入。
 	return data
 
 

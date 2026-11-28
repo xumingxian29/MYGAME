@@ -1,15 +1,19 @@
 class_name StartMenu
 extends CanvasLayer
 
-## 开局菜单：选职业 + 输入昵称，或直接点选本机已有玩家。
+## 开局菜单：选职业 + 选难度 + 输入昵称，或直接点选本机已有玩家。
 ## process_mode = ALWAYS，所以 get_tree().paused 时仍能打字、点按钮。
-## 只负责收集"昵称 + 职业"，通过 started 信号回传给 Game，不碰任何游戏规则。
+## 只负责收集"昵称 + 职业 + 难度"，通过 started 信号回传给 Game，不碰任何游戏规则。
 
-signal started(player_name: String, hero: int)
+signal started(player_name: String, hero: int, difficulty: int)
 
 const PANEL_WIDTH: float = 640.0
+## 面板上下与视口边缘的最小留白。面板高度 = 视口高 - 2×这个值，
+## 内容超出时靠 ScrollContainer 滚动——以前面板被内容撑到 825px，
+## 桌面 720 裁掉音效开关，触屏 540 连"开始游戏"都看不见（11/28 加难度行时实测）。
+const PANEL_MARGIN: float = 12.0
 ## 榜单最多显示几条，避免玩家人数过多把面板撑出屏幕
-const MAX_ROWS: int = 6
+const MAX_ROWS: int = 4
 
 ## 昵称框右侧的兜底按钮：万一某个浏览器没实现软键盘（Web 导出必须打开
 ## html/experimental_virtual_keyboard，否则 FEATURE_VIRTUAL_KEYBOARD 一直是 false），
@@ -25,6 +29,9 @@ var _list: VBoxContainer
 var _empty_label: Label
 var _desc_label: Label
 var _class_buttons: Array[Button] = []
+var _difficulty_buttons: Array[Button] = []
+var _difficulty_desc: Label
+var _difficulty: int = Difficulty.DEFAULT
 var _hero: int = HeroClass.WARRIOR
 ## 触屏模式下换操作说明，并且不自动抢焦点（一进菜单就弹软键盘会挡住半屏）
 var _touch_mode: bool = false
@@ -56,32 +63,42 @@ func _build() -> void:
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	_root.add_child(dim)
 
-	var center := CenterContainer.new()
-	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_root.add_child(center)
-
+	# 面板不再用 CenterContainer 撑内容：高度固定为"视口 - 留白"，超出滚动。
+	# 锚点写死左右半宽居中、上下贴边，视口怎么变（旋转 / 浏览器拖拽）都不会被裁。
 	_panel = PanelContainer.new()
-	_panel.custom_minimum_size = Vector2(PANEL_WIDTH, 0)
+	_panel.anchor_left = 0.5
+	_panel.anchor_right = 0.5
+	_panel.anchor_top = 0.0
+	_panel.anchor_bottom = 1.0
+	_panel.offset_left = -PANEL_WIDTH * 0.5
+	_panel.offset_right = PANEL_WIDTH * 0.5
+	_panel.offset_top = PANEL_MARGIN
+	_panel.offset_bottom = -PANEL_MARGIN
 	var panel_style := UiKit.panel_style(Color(0.55, 0.75, 1.0, 0.85))
-	panel_style.set_content_margin_all(22)
+	panel_style.set_content_margin_all(18)
 	_panel.add_theme_stylebox_override("panel", panel_style)
-	center.add_child(_panel)
+	_root.add_child(_panel)
+
+	# 内容包一层滚动：触屏 540 逻辑高度下，榜单和音效开关要滚一屏才能看到，
+	# 但"开始游戏"必须第一眼就在屏内（见内容压缩各处的注释）。
+	var scroll := ScrollContainer.new()
+	scroll.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	_panel.add_child(scroll)
 
 	_box = VBoxContainer.new()
-	_box.add_theme_constant_override("separation", 8)
-	_panel.add_child(_box)
+	_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_box.add_theme_constant_override("separation", 7)
+	scroll.add_child(_box)
 
-	var title := UiKit.label("暗夜幸存者", 34, Color(1.0, 0.92, 0.6))
+	var title := UiKit.label("暗夜幸存者", 26, Color(1.0, 0.92, 0.6))
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_box.add_child(title)
 
-	var subtitle := UiKit.label("王子 · 黑暗城堡 · 十道门", 13, Color(0.72, 0.80, 0.94))
-	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_box.add_child(subtitle)
-
 	# 剧情的第一句放在菜单里。玩家点"开始"之前就该知道自己是王子、
 	# 被关在城堡里——否则第一屏剧情会像是另一个游戏的开场。
+	# （原来的独立副标题"王子 · 黑暗城堡 · 十道门"与这句重复，压缩高度时删掉。）
 	var premise := UiKit.label(Story.prologue(), 12, Color(0.74, 0.68, 0.84))
 	premise.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	premise.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -107,6 +124,9 @@ func _build() -> void:
 	_build_class_picker()
 
 	_box.add_child(UiKit.divider())
+	_build_difficulty_picker()
+
+	_box.add_child(UiKit.divider())
 	_build_columns()
 
 	_box.add_child(UiKit.divider())
@@ -118,6 +138,7 @@ func _build() -> void:
 
 	_build_mute_toggle()
 	_select_hero(HeroClass.WARRIOR)
+	_select_difficulty(_difficulty)
 
 
 ## 音效开关。放在菜单而不是战斗中：战斗里没人会停下来找静音键，
@@ -177,10 +198,62 @@ func _build_class_picker() -> void:
 	for i in range(HeroClass.COUNT):
 		row.add_child(_make_class_button(i))
 
-	_desc_label = UiKit.label("", 13, Color(0.8, 0.86, 0.96))
+	_desc_label = UiKit.label("", 12, Color(0.8, 0.86, 0.96))
 	_desc_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_desc_label.custom_minimum_size = Vector2(0, 38)
+	_desc_label.custom_minimum_size = Vector2(0, 30)
 	_box.add_child(_desc_label)
+
+
+## 难度三选一。做成一行三个小按钮 + 一行说明，而不是三张职业卡那种大卡：
+## 菜单在触屏上只有 540 逻辑高度，职业卡那 74px 再来一份会把"开始游戏"顶出屏幕。
+## 说明行跟着选择切换（和职业说明同一个思路），不占三份固定高度。
+func _build_difficulty_picker() -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	_box.add_child(row)
+	for i in range(Difficulty.COUNT):
+		row.add_child(_make_difficulty_button(i))
+
+	_difficulty_desc = UiKit.label("", 12, Color(0.72, 0.80, 0.94))
+	_difficulty_desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_difficulty_desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_difficulty_desc.custom_minimum_size = Vector2(0, 18)
+	_box.add_child(_difficulty_desc)
+
+
+func _make_difficulty_button(index: int) -> Button:
+	var button := Button.new()
+	button.text = Difficulty.name_of(index)
+	button.custom_minimum_size = Vector2(0, 32)
+	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	button.focus_mode = Control.FOCUS_NONE
+	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	button.tooltip_text = Difficulty.desc_of(index)
+	button.add_theme_font_override("font", UiKit.font())
+	button.add_theme_font_size_override("font_size", 15)
+	button.pressed.connect(_ui_sound)
+	button.pressed.connect(_select_difficulty.bind(index))
+	_difficulty_buttons.append(button)
+	return button
+
+
+func _style_difficulty_button(button: Button, index: int, selected: bool) -> void:
+	var color: Color = Difficulty.color_of(index)
+	var bg: Color = Color(0.17, 0.20, 0.28) if selected else Color(0.08, 0.10, 0.15)
+	var border: Color = color if selected else Color(1.0, 1.0, 1.0, 0.12)
+	button.add_theme_stylebox_override("normal", UiKit.flat(bg, border, 8, 2 if selected else 1))
+	button.add_theme_stylebox_override("hover", UiKit.flat(Color(0.19, 0.23, 0.31), color, 8, 2))
+	button.add_theme_stylebox_override("pressed", UiKit.flat(Color(0.23, 0.27, 0.36), color, 8, 2))
+	button.add_theme_color_override("font_color", Color(0.95, 0.97, 1.0) if selected else Color(0.6, 0.67, 0.8))
+
+
+func _select_difficulty(index: int) -> void:
+	_difficulty = Difficulty.clamp_index(index)
+	for i in range(_difficulty_buttons.size()):
+		_style_difficulty_button(_difficulty_buttons[i], i, i == _difficulty)
+	if _difficulty_desc != null:
+		_difficulty_desc.text = "难度：%s —— %s" % [
+			Difficulty.name_of(_difficulty), Difficulty.desc_of(_difficulty)]
 
 
 ## 左列放输入与开始按钮，右列放战绩榜：竖着排会超出 648 的画面高度
@@ -243,7 +316,7 @@ func _build_columns() -> void:
 
 func _make_class_button(index: int) -> Button:
 	var button := Button.new()
-	button.custom_minimum_size = Vector2(0, 74)
+	button.custom_minimum_size = Vector2(0, 64)
 	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	button.focus_mode = Control.FOCUS_NONE
 	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -353,7 +426,7 @@ func _on_random_name() -> void:
 # ---------------------------------------------------------------- 对外接口
 
 func open(default_name: String, players: Array[Dictionary], hero: int = HeroClass.WARRIOR,
-		touch: bool = false) -> void:
+		touch: bool = false, difficulty: int = Difficulty.DEFAULT) -> void:
 	_locked = false
 	_touch_mode = touch
 	_root.visible = true
@@ -361,6 +434,7 @@ func open(default_name: String, players: Array[Dictionary], hero: int = HeroClas
 		_hint.text = _hint_text()
 	_refresh(players)
 	_select_hero(hero)
+	_select_difficulty(difficulty)
 	_input.text = default_name
 	# 没有软键盘可用时才亮出"随机"按钮，正常桌面端和开了软键盘的手机都看不到它
 	if _random_btn != null:
@@ -456,7 +530,10 @@ func _start_with(raw: String) -> void:
 	if _locked or not _root.visible:
 		return
 	_locked = true
-	started.emit(ScoreBoard.sanitize(raw), _hero)
+	# 只在真的开局时才写存档：光在菜单里点来点去不该改"上次选择"，
+	# 否则玩家点开菜单、换了个档又退出，下次进来看到的就不是上次玩的那一档了。
+	ScoreBoard.set_last_difficulty(_difficulty)
+	started.emit(ScoreBoard.sanitize(raw), _hero, _difficulty)
 
 
 func _on_start_pressed() -> void:

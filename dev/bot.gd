@@ -38,6 +38,9 @@ var _game: Node = null
 var _out: PackedStringArray = []
 var _runs: Array[Dictionary] = []
 var _run_index: int = -1
+## 台架默认跑 Difficulty.DEFAULT —— 玩家不点难度时实际玩到的那一档。
+## 用 --difficulty=normal|hard 可以跑对照；汇总里会打印档位，避免两份数据混着读。
+var _difficulty: int = Difficulty.DEFAULT
 
 var _spawn_t: Dictionary = {}
 var _life_sum: float = 0.0
@@ -111,6 +114,21 @@ func _initialize() -> void:
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--stop-at="):
 			_stop_at = int(a.substr(10))
+	# --limit=秒：单局跑动上限的覆盖值。诊断"卡住"的局时用——
+	# 默认 2400 秒，卡死的一局要空跑半小时，改一次参数就再等半小时。
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--limit="):
+			_limit = float(a.substr(8))
+	# --difficulty=easy|normal|hard（也接受 0|1|2）。默认是玩家默认档。
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--difficulty="):
+			var d: String = a.substr(13).to_lower()
+			if d == "easy" or d == "0":
+				_difficulty = Difficulty.EASY
+			elif d == "normal" or d == "1":
+				_difficulty = Difficulty.NORMAL
+			elif d == "hard" or d == "2":
+				_difficulty = Difficulty.HARD
 	for s in seeds:
 		_runs.append({"strategy": "kite_skill", "seed": s, "hero": HeroClass.WARRIOR, "skill": true})
 		_runs.append({"strategy": "kite_ranged", "seed": s, "hero": HeroClass.RANGER, "skill": true})
@@ -148,7 +166,7 @@ func _physics_process(delta: float) -> bool:
 		_game = root.get_child(root.get_child_count() - 1)
 		if _game == null:
 			return false
-		_game._on_menu_started("bot", 0)
+		_game._on_menu_started("bot", 0, _difficulty)
 		_game.story_enabled = false
 		if _game.story_panel != null and _game.story_panel.is_open():
 			_game.story_panel.skip()
@@ -186,11 +204,13 @@ func _physics_process(delta: float) -> bool:
 		_next_run()
 		return false
 
-	# 商店（State.SHOP = 6）。bot 一律只逛不买：
-	# 买不买、买什么都是变量，会让 10 局基线不可比；
-	# 金币与商店的数值由 dev/shop_check.gd 单独覆盖。
+	# 商店：bot 会买药和补弹，但不买卡（选卡由升级流程单独覆盖）。
+	# 早先这里是"一律只逛不买"，理由是"买什么会让 10 局基线不可比"。
+	# 但十幕一局 30 分钟后，一条**从不回血**的基线量的其实是
+	# "能不能零治疗打通"，而真人手里有 10 次商店、几千金币。
+	# 那个基线会把"玩家正常吃药"算成"游戏太难"，反过来逼着把数值调低。
 	if _game._state == 6:
-		_game._close_shop()
+		_shop_visit()
 		return false
 
 	if _game._state == 3:
@@ -310,6 +330,24 @@ func _steer_with_zone(dir: Vector2) -> Vector2:
 
 
 ## 门优先于 Boss 和绕圈：Boss 已经倒了，场上没有需要拉扯的东西，
+## 商店决策：血少于 75% 买药，破甲弹少于 6 发补弹，卡不买（卡由升级流程覆盖）。
+## 顺序固定、条件固定，所以同一颗种子的两台机器仍然跑出同一条轨迹。
+func _shop_visit() -> void:
+	if is_instance_valid(_game.player):
+		var ratio: float = _game.player.health / maxf(_game.player.max_health, 1.0)
+		for i in range(_game._shop_stock.size()):
+			var item: Dictionary = _game._shop_stock[i]
+			if bool(item["bought"]):
+				continue
+			var price: int = int(item["price"])
+			if int(_game._gold) < price:
+				continue
+			var id: String = str(item["id"])
+			if (id == "heal" and ratio < 0.75) or (id == "breach" and int(_game._breach) < 6):
+				_game._on_shop_buy(i)
+	_game._close_shop()
+
+
 ## 唯一该做的就是走进最近的一扇门。bot 不会进门的话，每一局都会卡在
 ## "Boss 已死但不换图"，台架量出来的是一个静止场景，不是下一关。
 ##
@@ -366,6 +404,13 @@ func _steer_with_portal(dir: Vector2, delta: float) -> Vector2:
 		_game.player.reset_physics_interpolation()
 		_portal_wait = 0.0
 		_portal_stuck = 0.0
+	# 兜底的兜底：传送也进不去（门在墙那一侧、或玩家的位移被夹回去）时，
+	# 直接替玩家"申请"这扇门——台架量的是进门之后的数值，不是 bot 会不会走迷宫。
+	# 不这样兜的话，十局里会有一局空转到 2400 秒上限，中位数和逃出率都被它拖歪。
+	if _portal_wait > 5.0:
+		_portal_wait = 0.0
+		_portal_stuck = 0.0
+		_game._on_portal_requested(best)
 	return want
 
 
@@ -468,9 +513,18 @@ func _sample() -> void:
 	if is_instance_valid(_game.player):
 		zr = _zone_ratio(_game.player.global_position, _zone())
 	var zone_txt: String = "圈=    —" if zr < 0.0 else "圈=%5.0f%%" % (zr * 100.0)
-	_emit("  t=%3d lv=%2d 卡=%2d 杀+%3d 存活=%5.2fs 在场=%5.1f %s 血=%3.0f/%3.0f" % [
+	var door_d: float = -1.0
+	for p in _game._portals:
+		if not is_instance_valid(p):
+			continue
+		var d: float = p.global_position.distance_to(_game.player.global_position)
+		if door_d < 0.0 or d < door_d:
+			door_d = d
+	_emit("  t=%3d lv=%2d 卡=%2d 杀+%3d 存活=%5.2fs 在场=%5.1f %s 血=%3.0f/%3.0f  幕=%d 门=%d 距门=%.0f 待门=%s 状态=%d" % [
 		int(now), _game._level, _cards, kills, avg_life, avg_alive, zone_txt,
 		_game.player.health, _game.player.max_health,
+		_game._stage_index, _game._portals.size(), door_d, str(_game._awaiting_portal),
+		_game._state,
 	])
 	_life_sum = 0.0
 	_life_n = 0
@@ -612,8 +666,8 @@ func _aggregate() -> String:
 	lines.append("")
 	# 两个"上限"要分开写清楚，否则读表的人会以为跑动上限就是缩圈时间：
 	# _limit 只是跑动硬截止（用来区分"撞测试上限"和"被毒死"），圈归零是 _zone_cap()。
-	lines.append("=== 汇总  n=%d 局  跑动上限 %.0fs（圈 %.0fs 归零）===" % [
-		_results.size(), _limit, _zone_cap(),
+	lines.append("=== 汇总  n=%d 局  %s  跑动上限 %.0fs（圈 %.0fs 归零）===" % [
+		_results.size(), Difficulty.name_of(_difficulty), _limit, _zone_cap(),
 	])
 	var order: Array[String] = []
 	var all_wall: Array[float] = []

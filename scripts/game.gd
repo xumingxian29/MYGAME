@@ -10,10 +10,12 @@ extends Node2D
 ## （剧情屏 / 胜利结算）。旧值一个都不许动，shell 那边按数字判断状态。
 enum State { MENU, PLAYING, LEVEL_UP, GAME_OVER, PAUSED, CONFIRM, SHOP, STORY, VICTORY }
 
-## 前期节奏：前 GRACE_TIME 秒维持最轻压力，再在 RAMP_TIME 秒内平滑升到最重。
-## 所有难度数值都从 _pressure() 取，改曲线只需要动这两个常量。
-const GRACE_TIME: float = 45.0
-const RAMP_TIME: float = 150.0
+## 本章内的节奏：前 GRACE_TIME 秒维持最轻压力，再在 RAMP_TIME 秒内平滑升到最重。
+## **读的是 _stage_time 而不是 _elapsed**：十幕一局 30 分钟，用全局秒数的话
+## 第二幕一开门压力就已经拉满，每一幕都没有"从轻到重"的开场。
+## 现在每一幕都走一遍 30 → 120 秒的斜坡，和 Stage.INTRO_TIME 的密度斜坡叠在一起。
+const GRACE_TIME: float = 30.0
+const RAMP_TIME: float = 90.0
 
 ## 刷怪环按实际视野算，不再写死距离：默认 1152x648 配 zoom 1.35 时世界半宽只有 426.7，
 ## 原来 340~430 有一大截落在屏幕内，怪会从左右边缘凭空冒出来（垂直方向因为半高 240 才侥幸没露）。
@@ -59,26 +61,29 @@ const MOBILE_VIEWPORT: Vector2i = Vector2i(960, 540)
 ## 间隔从 0.7/0.28 拉到 0.95/0.46，单波产出直接减半。
 const SPAWN_INTERVAL_EASY: float = 0.95
 const SPAWN_INTERVAL_HARD: float = 0.46
-## 每过这么多秒，每波多刷一只。
-## 35 → 55：晚期一波从 11 只降到 8 只，配合下面的预算收缩，场上总量减半。
-const WAVE_GROWTH_SECONDS: float = 55.0
+## 本章内每过这么多秒，每波多刷一只。**上限 WAVE_CAP**。
+## 旧公式 `1 + _elapsed/55` 是按"一局 390 秒"写的：那时末期一波 8 只。
+## 十幕一局 1620 秒时同一个公式给 30 只/波——那不是房间，是怪河，
+## 而且它和"这一章打到哪了"没有关系，纯粹是"你玩得久"。
+## 现在改成章内秒数，并且**封顶 7 只**：一幕 180 秒走到 1 + 180/36 = 6 只。
+const WAVE_GROWTH_SECONDS: float = 36.0
+const WAVE_CAP: int = 7
 ## 新章前 Stage.INTRO_TIME 秒的刷怪密度，从 0.5 线性回到 1.0。
 ## INTRO_TIME 以前只管"出什么"（前 15 秒只出小兵），不管"出多少"：
 ## 实测早死的 6 局，掉血全发生在新章开头 30 秒——Boss 战刚打完、技能和破甲弹都空着，
 ## 密度却已经按 elapsed 拉满（晚期一波 10 只以上）。这一条补的就是那个缺口。
 const STAGE_INTRO_SPAWN_MIN: float = 0.5
-## 场上同时存在的敌人上限 = BUDGET_BASE + 存活秒数 / BUDGET_STEP。
+## 场上同时存在的敌人上限 = BUDGET_BASE + 本章秒数 / BUDGET_STEP，再封顶 BUDGET_CAP。
 ## 没有这道闸门时，刷怪速度（每秒数只）远超单目标清怪速度，屏外会堆到几百只。
 ##
-## 12 / 4.0 → 9 / 5.5：这是"少而硬"这条线的第一半（另一半是下面的血量）。
-## 390 秒时的上限从 109 掉到 79，场上实际数量从 90 上下掉到 55 上下——
-## 一张 9 房间的图，平均每房间 6 只，接近元气骑士一个普通房间的量级。
-##
-## 第一版收到 8 / 7.0（390s 上限 63）时，10 局中位从 262s 掉到 124s：
-## 怪少了一半，经验也少了一半，玩家升级变慢、卡变少、DPS 更低——
-## 数量本身成了负循环。所以数量只减 27%，缺的经验由 xp_value 补齐（见 Enemy.configure）。
+## 12 / 4.0 → 9 / 5.5 是"少而硬"这条线的第一半（另一半是血量）。
+## 但 5.5 这个除数同样只对 390 秒的一局成立：1620 秒时它给 303，
+## 撞死在全场 180 的上限上，等于"最后一幕的屏外永远排满"。
+## 现在按章内秒数算并封顶 70：一幕走完 9 + 180/4 = 54，
+## 和视野上限 40 + 缓冲 20 是同一个量级——排队不会挤爆，边缘也不会一阵一阵地空。
 const BUDGET_BASE: int = 9
-const BUDGET_STEP: float = 5.5
+const BUDGET_STEP: float = 4.0
+const BUDGET_CAP: int = 70
 
 ## 视野内敌人上限。与上面的全场预算分开：预算是"屏外可以排队多少"，
 ## 这条是"画面里同时最多几只"。玩家对看不见的东西没有压力感，
@@ -98,15 +103,22 @@ const VISIBLE_CAP_TICK: float = 0.25
 ## 缓冲太薄的话"补位"会跟不上 40 只的消耗速度，画面会一阵一阵地空。
 const ENEMY_OVERFLOW_ALLOWANCE: int = 20
 const ENEMY_HP_BASE: float = 9.0
-## 敌人血量 = BASE + 线性项 + 二次项。纯线性追不上后期的卡牌成长：
-## 实测 300 秒时玩家 19 张卡、血量还剩 161/274，等于后期没有威胁。
-## 二次项只在 150 秒后明显起作用（100 秒时只多 3 点血），不会反过来压死前中期。
+## 敌人血量 = BASE + 本章秒数 × 线性项。没有二次项，也不再读 _elapsed。
 ##
-## BASE 只给 11 而不是 16：16 是"血量翻倍"的第一版，实测开局三分钟内
-## 9/10 局直接死（战士中位 124s），因为玩家开局 DPS 是固定的，每只怪多花一下
-## 就等于被多围一秒。后期靠线性/二次项补，不用靠 BASE 补。
-const ENEMY_HP_GROWTH: float = 0.30
-const ENEMY_HP_QUADRATIC: float = 0.0009
+## 旧公式 `9 + 0.3t + 0.0009t²` 是按"一局 390 秒"标的：390 秒给 263（29 倍基础值），
+## 那已经是"后期要靠卡牌追"的量级。十幕一局 30 分钟，同一个公式在 1620 秒给 3174
+## ——是 390 秒那一档的 12 倍，而玩家的每个属性封顶 3 倍（StatCurve.CAP）。
+## 台架 10 局 0 次逃出、中位 201 秒，主因就是这一项，不是"玩家菜"。
+##
+## 现在：
+##   章内 —— 180 秒从 9 涨到 13.5（1.5 倍），负责"这一幕越打越紧"；
+##   章间 —— 交给 Stage.POWER（1.00→2.10）与 Stage 表的 hp_scale（1.0→1.12）。
+## 终幕末 / 首幕初 = 13.5 × 2.10 × 1.12 / 9 ≈ 3.5 倍，和玩家的输出成长（3~5 倍）同量级。
+##
+## 二次项直接删掉而不是调小：它在这条曲线上唯一的作用就是让"拖得久"变成惩罚，
+## 而十幕结构里"拖得久"本来就该由章节推进来定价。留着它只会让下一个调参的人
+## 以为它是配平的一部分。
+const ENEMY_HP_GROWTH: float = 0.025
 const ENEMY_SPEED_MIN: float = 62.0
 const ENEMY_SPEED_MAX: float = 94.0
 const ENEMY_SPEED_GROWTH: float = 0.35
@@ -114,20 +126,22 @@ const ENEMY_SPEED_GROWTH: float = 0.35
 ## 会走位的人**永远**不会被追上，后期唯一的死法就是圈缩没（实测 12 局里 8 局死时满血）。
 ## 但直接把上限抬到 81（总速 175）是错的方向：那一版战士的中位存活从 483s 掉到 185s，
 ## 变成"全程更难"而不是"后期更难"，等于把中期玩家一起劝退。
-## 结论：这条线不要动，后期压力交给下面那条只跟时间走的曲线。
+## 结论：这条线不要动，后期压力交给章节倍率与下面那条威胁曲线。
+## 增长速度读 _stage_time：每一幕都从"走得动"重新开始，131 秒后封顶。
 const ENEMY_SPEED_CAP: float = 46.0
 
-## 后期威胁曲线：一条只跟 elapsed 走的压力，盖在章节权重与基础曲线之上。
+## 后期威胁曲线：一条盖在章节权重与基础曲线之上的压力。
 ## 为什么需要它：章节时钟会被 Boss 战拖住（见 _physics_process），而"拖住"恰好
-## 集中在后期，于是玩家越强、拖得越久，难度反而越平——这是"满血拖到圈缩没"的根因。
+## 集中在后期，于是玩家越强、拖得越久，难度反而越平。
 ##
-## 关键是**起点**：0~240 秒必须与没有这条曲线时**一模一样**。早中期动一点，
-## 死亡时间就整体前移（见上面 ENEMY_SPEED_CAP 的对照数据）。
-## 两条压力同步爬升，240 秒起、390 秒爬满：
+## **起点从"秒数"改成"幕号"**：原来 240 秒起、390 秒爬满，只对一局 6 分钟成立；
+## 十幕一局里它从第二幕起就永久拉满，等于没有曲线，只剩"第二幕之后一直最狠"。
+## 现在第 1~4 幕恒为 0，第 5 幕起用 5 幕爬满（第 9 幕到顶）：
 ##   速度 +28（总速 140→168，仍低于所有职业，但绕圈时必须贴边）
 ##   吐息者占比 +0.20（它是唯一不贴身就能造成伤害的敌人，"站桩清屏"不再安全）
-const THREAT_START: float = 240.0
-const THREAT_RAMP: float = 150.0
+##   第 5~9 幕的爬升量和玩家的成长是同一条斜率，第二幕不会再被它顶穿
+const THREAT_START_STAGE: int = 4
+const THREAT_RAMP_STAGES: float = 5.0
 const THREAT_SPEED_BONUS: float = 28.0
 const THREAT_SPITTER_BONUS: float = 0.20
 const THREAT_SPECIAL_CAP: float = 0.70
@@ -137,17 +151,16 @@ const THREAT_SPECIAL_CAP: float = 0.70
 const ELITE_START_TIME: float = 45.0
 const ELITE_CHANCE: float = 0.12
 
-## 每穿过一道传送门，下一幕的普通怪属性按门的难度累加上去（加法，不是连乘）。
-## 为什么是累乘：玩家过一关拿一张卡 + 回一部分血，成长是乘法级的（卡牌叠乘），
-## 敌人用加法会被越甩越远——这正是旧版"越后期越宽裕"的根因。
-## 10% 这个数不是拍的：三张图之后 1.33，五张图之后 1.61，刚好和玩家一轮成型
-## （约 5~6 张核心卡）的强度同步；再高会变成"过两关就必死"。
-## 只作用于普通怪（含精英）与它们的伤害，不作用于 Boss：
+## 难度倍率只作用于普通怪（含精英）与它们的伤害，不作用于 Boss：
 ## Boss 血量 = 破甲弹发数 × 固定 40，随难度乘会直接破坏"捡几发打几下"的配平，
 ## Boss 的成长走 Stage 表自己的 hp_scale / breach_shots 曲线。
-## 每层的增量不再固定 +10%，改由"走的是哪扇门"决定（见 Portal.DIFFICULTY）。
+##
+## 倍率由两部分相乘：**这一幕的基准**（Stage.POWER，只跟走到第几幕有关）
+## × **上一扇门的偏移**（Portal.BIAS，0.95~1.15，只影响下一幕，不累积）。
+## 旧的写法是"每门 +20%~+100% 加法累加"，十幕会累到 +900%，
+## 而玩家属性封顶 3 倍——那不是选择，是判死刑。
 ## 速度单独封顶。连乘几次之后怪速会超过玩家，风筝流直接失效；
-## 更糟的是"跑不掉"不是难度，是判死刑。所以速度只吃前几层的加成，停在 1.5×。
+## 更糟的是"跑不掉"不是难度，是判死刑。所以速度只吃加成的前几档，停在 1.5×。
 const FLOOR_SPEED_CAP: float = 1.5
 
 ## 商人三件货。价格整体 ×10：原来的 160 金在"一张图 540 金"的尺度下，
@@ -335,10 +348,12 @@ var _map_index: int = 0
 ## 三处必须永远是同一个数，否则玩家会在第 9 幕看到一个空屏。
 const PORTAL_LIMIT: int = 10
 ## 王座厅的守门人数量与出场节奏。
-## 16 + 8×i 发：五位分别是 16/24/32/40/48 发，合计 160 发。
+## 12 + 2×i 发：五位分别是 12/14/16/18/20 发，合计 80 发。
 ## 这个数不是拍的：一次破甲窗口 3.0 秒、按 0.25 秒的锁定间隔最多吃 4 发，
-## 16 发等于"必须走完四个窗口"，而窗口之间玩家要躲招、捡弹——
+## 12 发等于"必须走完三个窗口"，而窗口之间玩家要躲招、捡弹——
 ## 五位连着打，节奏才刚好是"一场长战"而不是五场小战。
+## （旧注释写的是 16+8i / 合计 160 发，常量早就改了而注释没跟上；
+##   照着旧注释调数值会打出两倍的时长。改常量时请连这一行一起改。）
 const GAUNTLET_BASE_SHOTS: int = 12
 const GAUNTLET_SHOT_STEP: int = 2
 ## 王座厅的破甲弹掉率（秒/枚）。比平时快：五位连着打，中间没有普通怪给玩家
@@ -351,11 +366,11 @@ const GAUNTLET_GAP: float = 2.4
 ## 和 _map_index 分开记：_map_index 是"玩家看到第几张图"（含第一张，从 0 起），
 ## _floor 是"被放大过几次"（第一张图是 0 次）。两者数值恰好相同但语义不同。
 var _floor: int = 0
-## 累计难度增量。原来是 FLOOR_POWER_STEP ^ _floor（每层固定 +10%），
-## 现在由"走的是哪扇门"决定——四扇门的增量从 +20% 到 +100% 不等，
-## **加法累加**而不是连乘：连乘在 +100% 那扇门之后会直接翻倍再翻倍，
-## 五层就到 32 倍，那是"选错一次就死"，不是选择。
-var _floor_power: float = 0.0
+## 上一扇门带来的**本幕偏移**（1.0 = 没偏移）。
+## 只在进门那一刻被覆盖一次，之后一直读到下一扇门——所以它天然不累积：
+## 最终倍率永远是 Stage.power_at(幕) × 这个数，被表钉死。
+## 名字不叫 difficulty：那会让人以为它可以一直加下去，而这正是被推翻的写法。
+var _gate_bias: float = 1.0
 ## Boss 已死、四扇门已开、等玩家选门的这段"间隙"。
 ## 它必须独立成一个标记，不能靠 _boss == null 判断：_boss 在战斗间隙也常是 null。
 ## 这个状态下停刷、停 Boss 检查、也不推进章节时钟——玩家可以慢慢挑门。
@@ -437,6 +452,11 @@ var _profile: Dictionary = {}
 ## 本局职业，以及菜单里上次选的职业（换人时沿用，不用每次重选）
 var _hero: int = HeroClass.WARRIOR
 var _last_hero: int = HeroClass.WARRIOR
+## 本局难度档。代码默认 NORMAL（裸曲线恒等）：dev/ 下 484 项自检直接调
+## _on_menu_started(name, hero) 两参，量的是设计基准曲线，不该被难度旋钮带偏。
+## 玩家的默认档是 Difficulty.DEFAULT（轻松），由主菜单在 started 信号里显式注入；
+## 台架 bot 也读同一个 DEFAULT。三档只叠乘数，不改 _power_scale() 与波数公式。
+var difficulty: int = Difficulty.NORMAL
 ## 外部打断导致的暂停原因："portrait"（竖屏）/ "hidden"（切后台）。
 ## 用一个集合而不是几个 bool：手机可以同时"竖屏 + 切后台"，
 ## 只解除其中一个时游戏不该突然跑起来。
@@ -723,12 +743,18 @@ func _open_menu() -> void:
 	hud.set_hud_visible(false)
 	if tutorial != null:
 		tutorial.flush()
-	start_menu.open(ScoreBoard.last_player(), ScoreBoard.list_players(), _last_hero, _touch_mode)
+	start_menu.open(ScoreBoard.last_player(), ScoreBoard.list_players(), _last_hero,
+		_touch_mode, ScoreBoard.last_difficulty())
 
 
-func _on_menu_started(player_name: String, hero: int) -> void:
+## diff 默认 NORMAL 是**故意的**：dev/ 下 484 项自检都用两参调用，量的是裸曲线，
+## 难度旋钮一带进去就会让"每波 4 只""终幕 3.5 倍"这类断言失去意义。
+## 玩家走菜单（三参，默认 Difficulty.DEFAULT = 轻松），台架 bot 显式传同一档。
+## 死亡后 R 重开不经过这里，difficulty 保持上一局的值——换难度要回菜单。
+func _on_menu_started(player_name: String, hero: int, diff: int = Difficulty.NORMAL) -> void:
 	_hero = clampi(hero, 0, HeroClass.COUNT - 1)
 	_last_hero = _hero
+	difficulty = Difficulty.clamp_index(diff)
 	_profile = ScoreBoard.load_profile(player_name)
 	start_menu.close()
 	_begin_run()
@@ -768,7 +794,7 @@ func _begin_run() -> void:
 	_awaiting_portal = false
 	_portals.clear()
 	_floor = 0
-	_floor_power = 0.0
+	_gate_bias = 1.0
 	_portal_count = 0
 	_gate_trail.clear()
 	_last_choice = ""
@@ -828,6 +854,9 @@ func _spawn_player() -> void:
 	player = Player.new()
 	# hero 必须在 add_child 之前赋值：Player._ready 里要按职业装配武器
 	player.hero = _hero
+	# 难度唯一需要注入 Player 的量。放在 _ready 之前，武器装配时不会读到旧值。
+	# 标准档 1.0 = 恒等，所有直接 new Player 的自检都不受影响。
+	player.damage_taken_scale = Difficulty.damage_taken(difficulty)
 	player.enemies = _enemies
 	world.add_child(player)
 	player.health_changed.connect(hud.set_health)
@@ -911,9 +940,10 @@ func _physics_process(delta: float) -> void:
 		_update_hud()
 
 
-## 0 = 刚开局的最轻压力，1 = 压力拉满
+## 0 = 刚进这一幕的最轻压力，1 = 压力拉满。
+## 读 _stage_time：每一幕都重新走一遍 30→120 秒的斜坡，而不是"第二幕一开门就最狠"。
 func _pressure() -> float:
-	return clampf((_elapsed - GRACE_TIME) / RAMP_TIME, 0.0, 1.0)
+	return clampf((_stage_time - GRACE_TIME) / RAMP_TIME, 0.0, 1.0)
 
 
 func _process(_delta: float) -> void:
@@ -948,11 +978,18 @@ func _spawn_wave() -> void:
 	# 再多刷只会立刻被 _tick_visible_cap 推回去，白跑一趟随机数。
 	if _visible_enemy_count() >= _visible_cap():
 		return
-	var count: int = 1 + int(_elapsed / WAVE_GROWTH_SECONDS)
+	# 每波只数 = 1 + 深度加成 + 本章秒数，封顶 7。
+	# **深度加成**是为了"第 10 幕一开场不能和第 1 幕一样空"：玩家这时已经一身卡，
+	# 屏幕上只有一只怪不是"缓冲"，是"游戏卡了"。每深三幕多 1 只，最多 +2。
+	# 按 _elapsed 算的老公式在 30 分钟一局里给 30 只/波，那是屏幕外一条怪河。
+	var count: int = mini(1 + _depth_bonus() + int(_stage_time / WAVE_GROWTH_SECONDS), WAVE_CAP)
 	# 新章开场压密度：每波只出 count × 密度，至少 1 只（0 只会让"开局 15 秒没有怪"，
 	# 那不是缓冲，是空转）。round 而不是 int：晚期 6 只 × 0.75 该给 4.5 → 5，
 	# 直接截断会一直是 4，斜坡的手感会变成阶梯。
 	count = maxi(1, int(round(float(count) * _spawn_density())))
+	# 硬核档每波 +20%。轻松与标准都是 1.0（恒等）——轻松档刻意不减怪，
+	# 见 Difficulty 顶部注释：减怪会减经验，反而把玩家拖进死亡螺旋。
+	count = maxi(1, int(round(float(count) * Difficulty.wave_mult(difficulty))))
 	var budget: int = _enemy_budget()
 	for i in range(count):
 		if _enemies.size() >= budget:
@@ -963,8 +1000,20 @@ func _spawn_wave() -> void:
 ## 场上敌人数量的天花板，随存活时间缓慢放开。
 ## 注意这是**全场**预算（含屏外排队），视野内的上限由 _visible_cap() 单独管：
 ## 两条分开，屏外才有"下一批"可换，视野内又不会一次涌进来十几只。
+## 深度加成：每深三幕 +1，最多 +2。只给"密度"，不给数值——
+## 数值的增长是 Stage.POWER 的事，两者分开才不会又一次互相顶穿。
+func _depth_bonus() -> int:
+	return mini(int(floor(float(_stage_index) / 3.0)), 2)
+
+
+## 场上敌人数量的天花板，随**本章**秒数缓慢放开（并吃深度加成）。
+## 注意这是**全场**预算（含屏外排队），视野内的上限由 _visible_cap() 单独管：
+## 两条分开，屏外才有"下一批"可换，视野内又不会一次涌进来十几只。
 func _enemy_budget() -> int:
-	var curve: int = BUDGET_BASE + int(_elapsed / BUDGET_STEP)
+	# 一幕走完 9 + 16 + 180/4 = 70（封顶），和视野上限 40 + 缓冲 20 同量级。
+	# 不封顶的话第 10 幕是 300+，屏外永远排满，"驱逐"每拍都在把怪往回推，边缘像在抖。
+	var curve: int = mini(BUDGET_BASE + _depth_bonus() * 8 + int(_stage_time / BUDGET_STEP),
+		BUDGET_CAP)
 	# 第三条闸门：全场 = 视野上限 + 少量屏外缓冲。
 	# 前两条（时间曲线 / 设备上限）允许屏外堆 60 只，而视野内只放 20 只，
 	# 结果是"驱逐"每拍都在跑、边缘的怪反复被弹回去。加上这一条之后，
@@ -1108,28 +1157,32 @@ func _spawn_enemy() -> void:
 ## 造一只敌人并挂进 world。位置由调用方给：普通刷怪用视野外的环，
 ## Boss 召唤用 Boss 周围的固定环——后者不该让这里自己去猜。
 ## 所有来源都在这里统一收进安全区：这是唯一的建怪出入口，只在这里夹一次就够。
-## 后期威胁系数：0~THREAT_START 秒恒为 0，之后线性爬满。
+## 后期威胁系数：前 THREAT_START_STAGE 幕恒为 0，之后用 5 幕线性爬满。
+## 读的是**幕号**不是秒数：十幕一局 30 分钟，按秒数算它从第二幕起就永久拉满，
+## 等于没有曲线，只剩"第二幕之后一直最狠"——那正好是台架里 201 秒那道墙。
 ## 所有"后期才该出现的压力"都乘这一项，调起点只改一个数，
 ## 不会出现"速度已经在爬、吐息者还没动"的错位。
 func _threat() -> float:
-	return clampf((_elapsed - THREAT_START) / THREAT_RAMP, 0.0, 1.0)
+	return clampf(float(_stage_index - THREAT_START_STAGE) / THREAT_RAMP_STAGES, 0.0, 1.0)
 
 
-## 当前图层（第几张图）的难度乘数。每穿过一道传送门 ×1.10，累乘。
-## 单独一个函数而不是散在 _create_enemy 里：吐息伤害、Boss 召唤物、自检脚本
-## 都要读同一个数，写两遍迟早对不上。
+## 当前这一幕的难度乘数 = 幕基准 × 上一扇门的偏移。
+## 单一来源，两层相乘：基准只跟"走到第几幕"有关（Stage.POWER），
+## 偏移只跟"上一扇门选了什么"有关（Portal.BIAS），互不污染。
+## 单独一个函数而不是散在 _create_enemy 里：吐息伤害、Boss 召唤物、自检脚本、
+## 选门确认面板都要读同一个数，写两遍迟早对不上。
 func _power_scale() -> float:
-	return 1.0 + _floor_power
+	return Stage.power_at(_stage_index) * _gate_bias
 
 
 func _create_enemy(kind: int, big: bool, at: Vector2, minion: bool = false) -> void:
 	at = _clamp_into_walkable(at)
-	var hp: float = ENEMY_HP_BASE + _elapsed * ENEMY_HP_GROWTH + _elapsed * _elapsed * ENEMY_HP_QUADRATIC
-	# 章节倍率乘在全局时间曲线之上：全局曲线负责"越拖越硬"，
-	# 章节倍率负责"越往下越硬"。两者分开，改一章的难度不会影响另一章。
+	var hp: float = ENEMY_HP_BASE + _stage_time * ENEMY_HP_GROWTH
+	# 幕倍率乘在章内时间曲线之上：时间曲线负责"这一幕越打越紧"（1.0→1.5），
+	# 幕倍率负责"越往下越硬"（1.00→2.10）。两者分开，改一幕的难度不会影响另一幕。
 	hp *= float(Stage.at(_stage_index)["hp_scale"])
 	var speed: float = randf_range(ENEMY_SPEED_MIN, ENEMY_SPEED_MAX)
-	speed += minf(_elapsed * ENEMY_SPEED_GROWTH, ENEMY_SPEED_CAP) + THREAT_SPEED_BONUS * _threat()
+	speed += minf(_stage_time * ENEMY_SPEED_GROWTH, ENEMY_SPEED_CAP) + THREAT_SPEED_BONUS * _threat()
 	if big:
 		hp *= 2.4
 		# 只减速 15%：太慢的话精英会一直落在队伍后面，永远打不到也杀不掉
@@ -1224,7 +1277,7 @@ func _spawn_boss() -> void:
 	_create_boss(boss_name, Enemy.BREACH_HIT_DAMAGE * float(shots), "", beat)
 
 
-## 王座厅的守门人。血量按名次涨（16/24/32/40/48 发，合计 160 发）。
+## 王座厅的守门人。血量按名次涨（12/14/16/18/20 发，合计 80 发）。
 ## 名字与台词来自 Story.GAUNTLET：前三位是前面见过的守门人，
 ## 第四位是王子自己的影子，第五位是城堡本身——"越打越像自己"。
 func _spawn_gauntlet_boss() -> void:
@@ -1248,8 +1301,17 @@ func _spawn_gauntlet_boss() -> void:
 ## 普通关底和王座厅只在这四样上不同，其余（信号接线、入场保护、停刷、压场）
 ## 必须一模一样。分开写两份的话，迟早出现"王座厅的 Boss 不播受击音"这种漏。
 func _create_boss(boss_name: String, hp: float, rank: String, beat: String) -> void:
+	# 轻松档：每场 Boss 战（含王座厅每位守门人）开场补 2 发。
+	# 放在 _create_boss 而不是 _spawn_boss：王座厅走的是 _spawn_gauntlet_boss，
+	# 分开写两份就会出现"轻松档普通 Boss 补弹、守门人不补"这种漏。
+	# 标准/硬核为 0，恒等。
+	var gift: int = Difficulty.breach_gift(difficulty)
+	if gift > 0:
+		_breach += gift
+		if hud != null:
+			hud.set_breach(_breach)
 	var speed: float = (randf_range(ENEMY_SPEED_MIN, ENEMY_SPEED_MAX) \
-		+ minf(_elapsed * ENEMY_SPEED_GROWTH, ENEMY_SPEED_CAP) + THREAT_SPEED_BONUS * _threat()) * BOSS_SPEED_SCALE
+		+ minf(_stage_time * ENEMY_SPEED_GROWTH, ENEMY_SPEED_CAP) + THREAT_SPEED_BONUS * _threat()) * BOSS_SPEED_SCALE
 	# 招式风格跟着名字走，不跟着章号：王座厅会把三只老面孔再放一遍，
 	# 玩家记住的是"潮主会拍浪"，而不是"第几幕的 Boss 会什么"。
 	var kit: int = Stage.boss_kit(boss_name)
@@ -1582,6 +1644,8 @@ func _on_victory() -> void:
 	result["acts"] = Story.ACT_COUNT
 	result["bosses"] = _gauntlet_total
 	result["ending"] = _ending
+	# 难度写进结算：轻松档通关和硬核档通关不是同一件事，玩家得看得出来。
+	result["difficulty"] = difficulty
 	hud.show_victory(result)
 
 
@@ -1653,6 +1717,8 @@ func _open_portals(at: Vector2) -> void:
 		portal.index = i
 		portal.reward = rewards[i]
 		portal.target = player
+		# 门上那行字直接给"下一幕的实际倍率"，和确认面板同一个数（见 Portal.power_text）。
+		portal.power_hint = Stage.power_at(_stage_index + 1) * float(Portal.BIAS[rewards[i]])
 		portal.request_enter.connect(_on_portal_requested)
 		world.add_child(portal)
 		portal.global_position = slots[i]
@@ -1661,7 +1727,7 @@ func _open_portals(at: Vector2) -> void:
 	# 横幅要说"现在该干什么"。只说"Boss 已击败"等于把玩家扔在原地。
 	if audio != null:
 		audio.play("clear")
-	hud.show_banner("四扇门已开", "奖励越好的门，下一幕越难（+20% ~ +100%）",
+	hud.show_banner("四扇门已开", "奖励越好的门，下一幕越难（×0.95 ~ ×1.15）",
 		Stage.tint(_stage_index), true)
 
 
@@ -1676,7 +1742,9 @@ func _on_portal_requested(portal: Portal) -> void:
 	# 提示里给的是"走这扇门之后"的累计数值，不是增量：
 	# 玩家真正要判断的是"下一幕有多难"，"+40%" 单独看没有参照。
 	var final: bool = portal.reward == Portal.Reward.VICTORY
-	var next_power: float = 1.0 + _floor_power + portal.difficulty()
+	# 给的是"走进这扇门之后那一幕的倍率"，不是增量：玩家真正要判断的是
+	# "下一幕有多难"，而 +15% 单独看没有参照（基准曲线在 Stage.POWER 里）。
+	var next_power: float = Stage.power_at(_stage_index + 1) * portal.bias()
 	# 确认面板要把"这一路是怎么走的"摊开：十个选择决定门外是什么，
 	# 但玩家在第 9 道门前已经记不清自己前 8 次选了什么。不给他看账本，
 	# "选择指向结局"这件事在游玩过程中就是隐形的，只在结算时才揭晓一次。
@@ -1709,7 +1777,7 @@ func _confirm_portal() -> void:
 		return
 	_grant_portal_reward(reward)
 	_record_choice(reward)
-	_floor_power += portal.difficulty()
+	_gate_bias = portal.bias()
 	_floor += 1
 	_map_index += 1
 	_portal_count += 1
@@ -1966,6 +2034,12 @@ func _rebuild_map() -> void:
 func _advance_stage(show_banner: bool = true) -> void:
 	_stage_index += 1
 	_stage_time = 0.0
+	# 轻松档：每进入新幕回 15% 最大生命。放在这里而不是 _rebuild_map，
+	# 是因为王座厅也走 _advance_stage 但不换普通图——回血该跟"幕"走，不该跟"地图"走。
+	# 标准/硬核为 0，整段是恒等，dev/ 下直接调 _advance_stage 的自检不受影响。
+	var heal_ratio: float = Difficulty.stage_heal(difficulty)
+	if heal_ratio > 0.0 and is_instance_valid(player):
+		player.heal(player.max_health * heal_ratio)
 	_apply_stage_look(Stage.at(_stage_index))
 	_card_delay = BANNER_READ_TIME
 	# 界面上的"第几章"现在由剧情决定（Story），Stage 只管敌人构成、Boss 与配色。
@@ -2707,6 +2781,7 @@ func _on_player_died() -> void:
 	result["stage_name"] = Stage.title(_stage_index)
 	result["cleared"] = _cleared
 	result["death_cause"] = _death_cause
+	result["difficulty"] = difficulty
 	hud.show_game_over(result)
 
 

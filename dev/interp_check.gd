@@ -96,6 +96,11 @@ func _check_spawn_sites() -> void:
 				continue
 			if not l.contains("global_position = "):
 				continue
+			# 连续位移写成 `= 下一帧的位置`（先算 to 再赋值）同样是每 tick 在推，
+			# 不会从原点滑过来。行尾标 `interp-ok` 显式豁免，别让扫描器逼着
+			# 把代码写成 `+= to - global_position` 那种怪样子。
+			if l.contains("interp-ok"):
+				continue
 			sites += 1
 			var has_reset: bool = false
 			for j in range(i, mini(i + 4, lines.size())):
@@ -138,16 +143,19 @@ func _check_runtime() -> void:
 	_ok(cam.physics_interpolation_mode != Node.PHYSICS_INTERPOLATION_MODE_OFF,
 		"相机没有被人为排除出插值", "mode=%d" % cam.physics_interpolation_mode)
 
-	# 真实刷怪路径：确认 _create_enemy 建出来的敌人是"已重置"状态，
-	# 重置过的节点在出生那一帧的插值位移必须是 0（否则它会从原点滑过来）
+	# 真实刷怪路径：确认 _create_enemy 建出来的敌人是"已重置"状态。
+	# 落点要先过 _clamp_into_walkable——420 像素外可能正好是墙，
+	# 那张图里它会贴到最近的空地，于是"距玩家 420"这种断言会随机红。
+	var spot: Vector2 = _game._clamp_into_walkable(player.global_position + Vector2(420.0, 0.0))
 	var before: int = _game._enemies.size()
-	_game._create_enemy(Enemy.Kind.GRUNT, false, player.global_position + Vector2(420.0, 0.0))
+	_game._create_enemy(Enemy.Kind.GRUNT, false, spot)
 	var fresh: Enemy = _game._enemies[before] if _game._enemies.size() > before else null
 	_ok(fresh != null, "可以通过真实的 _create_enemy 造出一只敌人")
 	if fresh != null:
 		_ok(fresh.is_physics_interpolated_and_enabled(), "新刷的敌人参与插值")
-		_ok(fresh.global_position.distance_to(player.global_position) > 300.0,
-			"新刷的敌人站在出生点而不是原点", "距玩家 %.0f" % fresh.global_position.distance_to(player.global_position))
+		_ok(fresh.global_position.distance_to(spot) < 1.0,
+			"新刷的敌人站在出生点而不是原点",
+			"落点 %s / 实际 %s" % [str(spot), str(fresh.global_position)])
 
 	# 宝石同理（Boss 死后会一次炸 8 颗，最容易被看出来）
 	var gem_before: int = _game._gems.size()

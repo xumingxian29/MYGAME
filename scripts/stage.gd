@@ -30,6 +30,25 @@ extends RefCounted
 ## breach_check 里有一条按表算的断言（165~200s/章 + 整局 25~35 分）钉住这件事。
 const INTRO_TIME: float = 15.0
 
+## 十幕的敌人倍率。**这是乘数，不是增量。**
+##
+## 旧版是"每扇门 +20%~+100%，加法累加"——那套是为 3~5 层的无尽局定的。
+## 搬到十幕之后同一条规则在第十幕累到 +900%（全选双卡），
+## 而玩家的每个属性有 StatCurve.CAP = 3.0 的硬封顶：
+## 敌人涨 11 倍、玩家封顶 3 倍，台架 10 局 0 次逃出、中位 201 秒，就是这条曲线的读法。
+##
+## 现在"多难"只由"走到第几幕"决定：1.00 → 2.10。
+## 再乘章内时间项（1.0→1.5，见 Game.ENEMY_HP_GROWTH）与下面的 hp_scale（1.0→1.12），
+## 第十幕末尾 / 第一幕开局 ≈ 3.5 倍——和玩家的成长（约 3~5 倍输出）同一量级，
+## 难度来自招式、数量与破甲窗口，不来自"血条比玩家的上限还高"。
+##
+## 门的选择还在，但只改**下一幕**的 ±15%（Portal.BIAS），不累积：
+## 一路选"贪"平均 1.15×、一路选"稳"平均 0.95×，相对差 20%——肉疼，但不劝退。
+##
+## 为什么是表不是公式：调第 6 幕不该牵动其余九幕，而表可以只改一格。
+## 加一幕就要加一格；漏了会走下面的无尽分支（×1.06/幕），不会崩。
+const POWER: Array[float] = [1.00, 1.09, 1.18, 1.29, 1.40, 1.52, 1.65, 1.79, 1.94, 2.10]
+
 ## 手写章节数。之后的章节由 _endless() 生成。
 const COUNT: int = 3
 const ORDINALS: Array[String] = ["第一章", "第二章", "第三章"]
@@ -142,6 +161,17 @@ static func at(index: int) -> Dictionary:
 	return _endless(index - COUNT + 1)
 
 
+## 第 index 幕的敌人倍率。
+## 超出十幕（无尽模式）时继续按 +6% 一幕往下涨，**不封顶**——
+## 无尽本来就该有一条走不到的尽头。王座厅不是"第十一幕"，它读第十幕这一格。
+static func power_at(index: int) -> float:
+	if index < 0:
+		index = 0
+	if index < POWER.size():
+		return POWER[index]
+	return POWER[POWER.size() - 1] * pow(1.06, float(index - POWER.size() + 1))
+
+
 static func _endless(cycle: int) -> Dictionary:
 	# 以第三章为模板：特殊怪全开，血量和长度按轮次往上加
 	var data: Dictionary = LIST[COUNT - 1].duplicate()
@@ -158,7 +188,7 @@ static func _endless(cycle: int) -> Dictionary:
 	# 破甲需求**不再随轮次上涨**。原来每轮 +4 发、掉率每轮慢 0.6 秒，
 	# 那是给"无尽"留的压力旋钮；十幕下它会把第 10 幕的 Boss 变成
 	# "60 发 × 4.4 秒 = 四分钟一场"，一场就把整局的节奏拖垮。
-	# 后期难度改由 _floor_power 承担（敌人属性 +20%~100% 逐门累加），
+	# 后期难度改由 Stage.POWER 承担（按幕查表，1.00→2.10），
 	# 而 Boss 的血量只由"发数"决定——两者不该再叠。
 	data["breach_shots"] = int(LIST[COUNT - 1]["breach_shots"])
 	data["breach_every"] = float(LIST[COUNT - 1]["breach_every"])

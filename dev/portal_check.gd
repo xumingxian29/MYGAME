@@ -4,7 +4,7 @@ extends SceneTree
 ## 用法：godot --headless --path . --fixed-fps 60 --script res://dev/portal_check.gd
 ##
 ## 覆盖五件事：
-##   1. 难度乘数：_floor 每加一层 ×1.10，累乘而不是加法
+##   1. 难度乘数：幕基准（Stage.POWER）× 上一扇门的偏移（Portal.BIAS），偏移不累积
 ##   2. Boss 死 → 四扇门：数量、位置可走、彼此不重叠、开门保护期
 ##   3. 挑门期间停刷停 Boss
 ##   4. 踩门**不直接传送**：先进确认态，取消后必须走开才允许再问
@@ -42,59 +42,75 @@ func _run() -> void:
 		game.story_panel.skip()
 	await process_frame
 
-	print("\n[门 → 难度增量]")
-	# 四扇门各自带增量，不再是"每层固定 +10%"
-	_check("单卡门 +20%", is_equal_approx(Portal.DIFFICULTY[Portal.Reward.CARD], 0.20),
-		"%f" % Portal.DIFFICULTY[Portal.Reward.CARD])
-	_check("破甲弹门 +40%", is_equal_approx(Portal.DIFFICULTY[Portal.Reward.BREACH], 0.40),
-		"%f" % Portal.DIFFICULTY[Portal.Reward.BREACH])
-	_check("金币门 +60%", is_equal_approx(Portal.DIFFICULTY[Portal.Reward.GOLD], 0.60),
-		"%f" % Portal.DIFFICULTY[Portal.Reward.GOLD])
-	_check("双卡门 +100%（最大）", is_equal_approx(Portal.DIFFICULTY[Portal.Reward.CARD2], 1.00),
-		"%f" % Portal.DIFFICULTY[Portal.Reward.CARD2])
+	print("\n[门 → 下一幕的难度乘数]")
+	# 门带的是**乘数**，只作用于下一幕，不累积（旧的加法累加在十幕里会到 +900%）
+	_check("单卡门 ×0.95（最小）",
+		is_equal_approx(Portal.BIAS[Portal.Reward.CARD], 0.95),
+		"%f" % Portal.BIAS[Portal.Reward.CARD])
+	_check("破甲弹门 ×1.05", is_equal_approx(Portal.BIAS[Portal.Reward.BREACH], 1.05),
+		"%f" % Portal.BIAS[Portal.Reward.BREACH])
+	_check("金币门 ×1.10", is_equal_approx(Portal.BIAS[Portal.Reward.GOLD], 1.10),
+		"%f" % Portal.BIAS[Portal.Reward.GOLD])
+	_check("双卡门 ×1.15（最大）",
+		is_equal_approx(Portal.BIAS[Portal.Reward.CARD2], 1.15),
+		"%f" % Portal.BIAS[Portal.Reward.CARD2])
+	_check("四扇门的差距不超过 25%",
+		Portal.BIAS[Portal.Reward.CARD2] / Portal.BIAS[Portal.Reward.CARD] <= 1.25,
+		"%f" % (Portal.BIAS[Portal.Reward.CARD2] / Portal.BIAS[Portal.Reward.CARD]))
 
-	print("\n[难度乘数]")
-	game._floor = 0
-	game._floor_power = 0.0
-	_check("第 1 图 = 1.00", is_equal_approx(game._power_scale(), 1.0),
+	print("\n[难度乘数 = 幕基准 × 门偏移]")
+	game._stage_index = 0
+	game._gate_bias = 1.0
+	_check("第 1 幕无偏移 = 1.00", is_equal_approx(game._power_scale(), 1.0),
 		"%f" % game._power_scale())
-	game._floor_power = 0.2
-	_check("走一扇单卡门 = 1.20", is_equal_approx(game._power_scale(), 1.2),
+	game._gate_bias = 1.15
+	_check("第 1 幕 + 双卡门 = 1.15", is_equal_approx(game._power_scale(), 1.15),
 		"%f" % game._power_scale())
-	# 加法累加：两次 +20% 和一次 +40% 一样难。连乘的话后者会明显更狠，
-	# 走三次双卡门直接 ×8，那不是选择，是判死刑。
-	game._floor_power = 0.4
-	_check("两次 +20% 等于一次 +40%（加法累加）",
-		is_equal_approx(game._power_scale(), 1.4), "%f" % game._power_scale())
-	game._floor_power = 3.0
-	_check("累加没有上限，但速度仍封顶 1.5×",
-		absf(minf(game._power_scale(), 1.5) - 1.5) < 0.0001,
-		"power=%f" % game._power_scale())
+	# 关键：偏移**不累积**。同一幕连续走两扇双卡门，倍率还是 1.15，不是 1.15²。
+	game._gate_bias = 1.15
+	game._gate_bias = 1.15
+	_check("偏移不累积（两次双卡仍是 1.15）",
+		is_equal_approx(game._power_scale(), 1.15), "%f" % game._power_scale())
+	game._stage_index = 5
+	game._gate_bias = 1.0
+	_check("第 6 幕 = 1.52", is_equal_approx(game._power_scale(), 1.52),
+		"%f" % game._power_scale())
+	_check("第 10 幕 = 2.10", is_equal_approx(Stage.power_at(9), 2.10),
+		"%f" % Stage.power_at(9))
+	_check("无尽第 12 幕继续涨",
+		Stage.power_at(11) > Stage.power_at(9), "%f" % Stage.power_at(11))
 
-	# 同一时刻、同一章造两只同类怪，唯一变量是难度系数
-	game._floor = 0
-	game._floor_power = 0.0
+	# 同一幕内、同一章造两只同类怪，唯一变量是章内时间（旧版这里是 _elapsed）
+	game._stage_index = 0
+	game._gate_bias = 1.0
+	game._stage_time = 0.0
 	game._create_enemy(Enemy.Kind.GRUNT, false, game.player.global_position + Vector2(600.0, 0.0))
 	var base_enemy: Enemy = game._enemies[game._enemies.size() - 1]
 	var base_hp: float = base_enemy.max_health
-	game._floor = 1
-	game._floor_power = 0.2
+	game._stage_time = 180.0
 	game._create_enemy(Enemy.Kind.GRUNT, false, game.player.global_position + Vector2(620.0, 0.0))
-	var hard_enemy: Enemy = game._enemies[game._enemies.size() - 1]
-	_check("血量吃到 +20%", absf(hard_enemy.max_health - base_hp * 1.2) < 0.01,
-		"%.1f → %.1f" % [base_hp, hard_enemy.max_health])
-	_check("伤害倍率注入到敌人", is_equal_approx(hard_enemy.power_scale, 1.2),
-		"%f" % hard_enemy.power_scale)
-	_check("第 1 图的怪不带倍率", is_equal_approx(base_enemy.power_scale, 1.0),
+	var late_enemy: Enemy = game._enemies[game._enemies.size() - 1]
+	_check("章内 180 秒血量只涨 1.5 倍（不是 10 倍）",
+		absf(late_enemy.max_health - base_hp * 1.5) < 0.05,
+		"%.1f → %.1f" % [base_hp, late_enemy.max_health])
+	_check("第 1 幕的怪不带倍率", is_equal_approx(base_enemy.power_scale, 1.0),
 		"%f" % base_enemy.power_scale)
+	# 设计目标（用户 11/28 定的口径）：终幕末的普通怪 / 首幕初 ≈ 3.5 倍。
+	# 用 180 秒实测的血量 × 幕表比 × hp_scale 比，而不是把三个常量乘一遍——
+	# 那样子项改了断言还是绿的。
+	var tail_ratio: float = late_enemy.max_health * (Stage.power_at(9) / Stage.power_at(0)) \
+		* (float(Stage.at(9)["hp_scale"]) / float(Stage.at(0)["hp_scale"])) / base_hp
+	_check("终幕末 / 首幕初 = 3.5 倍（3.3~3.7）",
+		tail_ratio > 3.3 and tail_ratio < 3.7, "%.2f" % tail_ratio)
 
 	# 清掉两只探针怪，别让它们干扰后面的数量断言
 	for e in game._enemies:
 		if is_instance_valid(e):
 			e.queue_free()
 	game._enemies.clear()
-	game._floor = 0
-	game._floor_power = 0.0
+	game._stage_index = 0
+	game._stage_time = 0.0
+	game._gate_bias = 1.0
 	await process_frame
 
 	print("\n[Boss 死 → 四扇门]")
@@ -233,8 +249,11 @@ func _run() -> void:
 	_check("确认后回到 PLAYING", game._state == game.State.PLAYING, "state=%d" % game._state)
 	_check("门已回收", game._portals.is_empty())
 	_check("难度上升一层", game._floor == 1, "实际 %d" % game._floor)
-	_check("累计难度 = 这扇门的增量（单卡 +20%）",
-		is_equal_approx(game._floor_power, 0.2), "%f" % game._floor_power)
+	_check("偏移 = 这扇门的乘数（不是累加）",
+		is_equal_approx(game._gate_bias, float(Portal.BIAS[reward])), "%f" % game._gate_bias)
+	_check("本幕倍率 = 幕表 × 这扇门的乘数",
+		is_equal_approx(game._power_scale(), Stage.power_at(1) * float(Portal.BIAS[reward])),
+		"%f" % game._power_scale())
 	_check("地图序号 +1", game._map_index == 1, "实际 %d" % game._map_index)
 	_check("章节推进一章", game._stage_index == 1, "实际 %d" % game._stage_index)
 	_check("换了一张新图", game.maze.get_instance_id() != old_maze_id)
@@ -291,6 +310,8 @@ func _run() -> void:
 	print("\n[新图的怪吃新倍率]")
 	game._create_enemy(Enemy.Kind.GRUNT, false, game.player.global_position + Vector2(500.0, 0.0))
 	var fresh: Enemy = game._enemies[game._enemies.size() - 1]
-	# 走的这扇门是单卡（+20%），所以新图的怪带 1.2×，不再是固定的 1.1×
-	_check("第 2 图的怪带 1.2×（这扇门 +20%）", is_equal_approx(fresh.power_scale, 1.2),
-		"%f" % fresh.power_scale)
+	# 走的这扇门是单卡（×0.95），所以第 2 幕的怪带 1.09 × 0.95 = 1.0355，
+	# 不再是一层固定 ×1.10，也不再是"每门 +20% 往上加"
+	var want_power: float = Stage.power_at(1) * float(Portal.BIAS[reward])
+	_check("第 2 幕的怪带 %.4f×（幕表 × 这扇门）" % want_power,
+		is_equal_approx(fresh.power_scale, want_power), "%f" % fresh.power_scale)

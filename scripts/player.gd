@@ -88,6 +88,12 @@ var boomerang_weapon: BoomerangWeapon
 ## 相机由玩家持有，震动直接改 offset，不需要额外的抖动节点
 var camera: Camera2D
 
+## 难度档的受击缩放，由 Game 在开局注入（1.0 = 标准档恒等）。
+## 单独一个字段而不是让 Game 去改每个伤害常量：接触、吐息、Boss 弹幕、毒圈
+## 全部汇到下面两个入口（take_damage / take_zone_damage），各乘一次就全覆盖。
+## 默认值 1.0 让所有直接 new Player 的自检不受影响。
+var damage_taken_scale: float = 1.0
+
 ## 受击无敌帧：避免被一群敌人同时贴身时瞬间融化
 var _invuln: float = 0.0
 ## 距允许回血还剩多久（任一受伤入口都会重置成 REGEN_DELAY），
@@ -386,7 +392,7 @@ func take_damage(amount: float) -> void:
 		return
 	_invuln = INVULN_TIME
 	_regen_wait = REGEN_DELAY
-	health = maxf(health - amount, 0.0)
+	health = maxf(health - amount * damage_taken_scale, 0.0)
 	health_changed.emit(health, max_health)
 	_flash()
 	if health <= 0.0:
@@ -416,8 +422,10 @@ func take_zone_damage(amount: float) -> void:
 	if health <= 0.0 or amount <= 0.0:
 		return
 	# 毒伤同样算"挨打"：站在圈外还想回血，等于把圈外惩罚抹掉
+	# 难度缩放对毒圈一视同仁：轻松档要是"怪打不动、毒圈照样秒"，
+	# 玩家会以为难度没生效。两个伤害入口用同一个字段，不会漏。
 	_regen_wait = REGEN_DELAY
-	health = maxf(health - amount, 0.0)
+	health = maxf(health - amount * damage_taken_scale, 0.0)
 	health_changed.emit(health, max_health)
 	if health <= 0.0:
 		_trauma = 0.0

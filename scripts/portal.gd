@@ -24,19 +24,23 @@ signal request_enter(portal: Portal)
 ## 和另外四扇完全一样——玩家不需要学第二种"出口"。
 enum Reward { CARD, CARD2, BREACH, GOLD, VICTORY }
 
-## 四扇门不再"难度一样、只有奖励不同"。原来无论走哪扇，下一层都是 +10%，
-## 于是"选门"退化成"选奖励"——玩家永远挑最值的那扇，选择本身没有代价。
-## 现在每扇门自带难度增量，叠加到下一层的敌人强度上：
-##   单卡 +20%（最小）  破甲弹 +40%  金币 +60%  双卡 +100%（最大）
-## 奖励越强，进去的那张图越难。这才是"要不要赌一把"。
-const DIFFICULTY: Dictionary = {
-	Reward.CARD: 0.20,
-	Reward.BREACH: 0.40,
-	Reward.GOLD: 0.60,
-	Reward.CARD2: 1.00,
-	# 胜利门后面没有下一张图，所以不加难度。写 0 而不是"不放进字典"，
-	# 是为了让 difficulty() / difficulty_text() 这两条路径对所有门都成立。
-	Reward.VICTORY: 0.0,
+## 四扇门不再"难度一样、只有奖励不同"。
+## 每扇门带一个**乘数**，只作用于**下一幕**，不累积：
+##   稳（单卡）0.95   破甲 1.05   金币 1.10   贪（双卡）1.15
+## 奖励越强，进去的那一幕越难一点点。
+##
+## 为什么从"加法 +20%~+100%"改成"乘法 ±15%"：
+## 加法在十幕里要加十次，全选双卡累到 +1000%，而玩家属性封顶 3 倍（StatCurve.CAP），
+## 一局 32 分钟的曲线在第七幕之后成了纯粹的血条墙，台架 0/10 逃出。
+## 乘法且不累积，代价才和"十幕"这个长度匹配（基准曲线见 Stage.POWER）。
+const BIAS: Dictionary = {
+	Reward.CARD: 0.95,
+	Reward.BREACH: 1.05,
+	Reward.GOLD: 1.10,
+	Reward.CARD2: 1.15,
+	# 胜利门后面没有下一幕，所以不改难度。写 1.0 而不是"不放进字典"，
+	# 是为了让 bias() 对所有门都成立（包括将来新增的门）。
+	Reward.VICTORY: 1.0,
 }
 
 ## 环的半径。比玩家半径大得多：门要"看着能走进去"，而不是一个贴地的小图标。
@@ -59,6 +63,9 @@ var index: int = 0
 ## 走到最后的"门外是什么"由这一局的选择决定，门下面得先把那个结局说出来——
 ## 否则玩家是"走进门之后才知道自己被分到了哪个结局"，那就不是选择的结果了。
 var subtitle: String = ""
+## 门底下那行"难度 +N%"的绝对值，由 Game 在开门时算好（幕基准 × 这扇门的偏移）。
+## 放在这里而不是让 Portal 自己算：Portal 不认识幕表，也不该认识。
+var power_hint: float = 0.0
 
 var _age: float = 0.0
 var _armed: bool = false
@@ -142,13 +149,21 @@ func reward_text() -> String:
 			return "额外一张卡"
 
 
-## 这扇门给下一层加多少难度（0.2 = +20%）。Game 进门时直接累加到难度系数上。
-func difficulty() -> float:
-	return float(DIFFICULTY.get(reward, 0.2))
+## 这扇门给**下一幕**的难度乘数（1.0 = 不变）。Game 进门时直接覆盖自己的偏移量。
+## 注意是乘数不是增量：增量在十幕里会累加十次（见下方 BIAS 的注释）。
+func bias() -> float:
+	return float(BIAS.get(reward, 1.0))
 
 
-func difficulty_text() -> String:
-	return "+%d%%" % roundi(difficulty() * 100.0)
+func power_text() -> String:
+	# 门上写的必须是**和确认面板同一个数**：面板给的是"下一幕敌人属性 +N%"，
+	# 门底下如果写"这一扇门 -5%"，玩家会以为两处有一处算错了。
+	if power_hint <= 0.0:
+		return "难度不变"
+	var delta: int = roundi((power_hint - 1.0) * 100.0)
+	if delta == 0:
+		return "难度不变"
+	return "难度 %+d%%" % delta
 
 
 ## 门的三层结构：外环（边界）、内旋涡（方向感）、中心符号（选的是什么）。
@@ -219,6 +234,6 @@ func _draw() -> void:
 	draw_string(font, Vector2(-70.0, RADIUS + 24.0), reward_text(),
 		HORIZONTAL_ALIGNMENT_CENTER, 140.0, 13, Color(1.0, 0.97, 0.92, text_alpha))
 	var sub: String = subtitle if subtitle != "" else (
-		"西门外 · 黎明" if reward == Reward.VICTORY else "难度 " + difficulty_text())
+		"西门外 · 黎明" if reward == Reward.VICTORY else power_text())
 	draw_string(font, Vector2(-70.0, RADIUS + 40.0), sub,
 		HORIZONTAL_ALIGNMENT_CENTER, 140.0, 12, Color(1.0, 0.76, 0.60, 0.9 * text_alpha))
