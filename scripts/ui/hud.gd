@@ -69,6 +69,7 @@ var _dim: ColorRect
 ## 血条高度是字体行高算出来的，写死一个数和实际值差 10 像素就是"压住血条"。
 var _corner_box: VBoxContainer
 var _right_box: VBoxContainer
+var _minimap: Minimap
 ## 屏顶 Boss 血条：名字 + 阶段 + 一条长血。只在 Boss 战期间显示。
 var _boss_panel: PanelContainer
 var _boss_bar: ProgressBar
@@ -238,6 +239,20 @@ func _build() -> void:
 
 	_pause_btn = _make_tool_button("暂停", Color(0.58, 0.76, 0.96), pause_toggled.emit)
 	tools.add_child(_pause_btn)
+
+	# 小地图挂在**这一列**的下面，不是另起一个角。理由和暂停键放这里一样：
+	# 四个角里只有右上是战斗中不用按的（左下摇杆、右下技能键），
+	# 而分数已经是右上这一列的固定住客——再找一个"不冲突的位置"只会更差。
+	var gap := Control.new()
+	gap.custom_minimum_size = Vector2(0.0, 6.0)
+	gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	right.add_child(gap)
+
+	_minimap = Minimap.new()
+	_minimap.name = "Minimap"
+	# 右对齐：这一列比小地图宽（分数很长），不靠右的话它会贴在中间。
+	_minimap.size_flags_horizontal = Control.SIZE_SHRINK_END
+	right.add_child(_minimap)
 
 	_build_boss_bar()
 	_build_banner()
@@ -512,6 +527,25 @@ func set_score(player_name: String, current: int, best: int) -> void:
 ## 开始菜单打开时整块 HUD 让位（菜单自带压暗层）
 func set_hud_visible(shown: bool) -> void:
 	_root.visible = shown
+
+
+# ---------------------------------------------------------------- 小地图
+
+## 换图时调用一次：把这张图烘焙成背景纹理。传 null 会整块隐藏。
+func setup_minimap(maze: MazeMap) -> void:
+	if _minimap == null:
+		return
+	_minimap.setup(maze)
+
+
+## 每帧推一次位置。**敌人由调用方先按雷达半径过滤**：
+## "谁算威胁"是玩法判断（Boss 战收紧、屏外排队），不该藏在一个画图控件里。
+func update_minimap(player_pos: Vector2, enemies: PackedVector2Array,
+		boss_pos: Vector2, has_boss: bool,
+		shop_pos: Vector2, has_shop: bool, gates: PackedVector2Array) -> void:
+	if _minimap == null:
+		return
+	_minimap.update_blips(player_pos, enemies, boss_pos, has_boss, shop_pos, has_shop, gates)
 
 
 ## 危血强度 0~1：0 完全不显示，1 满强度。缓动与心跳脉动都在 HUD 内完成，

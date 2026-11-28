@@ -805,6 +805,9 @@ func _begin_run() -> void:
 	player.maze = maze
 	maze.rebuild_flow(maze.start_pos())
 	_spawn_merchant()
+	# 小地图换底图。墙和地板只在换图时变，每帧重画 432 个格子纯属浪费。
+	if hud != null:
+		hud.setup_minimap(maze)
 	_map_index = 0
 	# 不直接进 PLAYING：先播第一幕。剧情期间整棵树冻结，
 	# 横幅与新手提示都在剧情播完之后才出（见 _on_story_finished），
@@ -892,6 +895,7 @@ func _physics_process(delta: float) -> void:
 	_apply_separation()
 	_cull_far_gems()
 	_tick_breach(delta)
+	_sync_minimap()
 	# Boss 血条每帧推：走 HUD 的 10Hz 节流会明显看出条是"一跳一跳"掉下去的。
 	# 状态字（攻击中 / 破甲 2.4s）也一起每帧推——窗口只开 3.8 秒，
 	# 晚 0.1 秒显示就等于少打一下；HUD 内部对"没变化"的情况是零开销的。
@@ -1921,6 +1925,14 @@ func _rebuild_map() -> void:
 	if is_instance_valid(_merchant):
 		_merchant.queue_free()
 	_merchant = null
+	# 四扇门同样点名清。正常流程里 _confirm_portal 已经清过了，但"换图"这件事
+	# 本身不该依赖调用方先收拾干净——漏一次的后果是上一张图的四扇门留在新图
+	# 的坐标里，小地图上会多出几个走不到的青点，玩家会绕着找根本不存在的门。
+	for p in _portals:
+		if is_instance_valid(p):
+			p.queue_free()
+	_portals.clear()
+	_awaiting_portal = false
 	_boss = null
 	_boss_grace = 0.0
 	if is_instance_valid(maze):
@@ -1941,6 +1953,8 @@ func _rebuild_map() -> void:
 		player.grant_invuln(1.5)
 	maze.rebuild_flow(maze.start_pos())
 	_spawn_merchant()
+	if hud != null:
+		hud.setup_minimap(maze)
 	# 给新图的第一次刷怪留两秒：玩家要看清自己在哪、宝箱（宝石）在哪
 	_spawn_timer = 2.0
 	_update_hud()
@@ -2832,6 +2846,39 @@ func _nearest_portal_offset() -> Vector2:
 			best_dist = delta.length()
 			best = delta
 	return best
+
+
+## 小地图：每帧推一次点。**敌人先按雷达半径过滤**——
+## 全图透视会把小地图变成"隔墙看怪"，那是改玩法，不是加辅助。
+## 过滤放在这里而不是控件里，是因为"谁算威胁"属于玩法判断
+## （Boss 战要收紧、屏外排队的怪不该报点），画图控件不该知道这些。
+## 用 PackedVector2Array 而不是 Array[Dictionary]：这是每帧新建的容器，
+## 字典版每只怪都要分配一次，四十只就是一帧四十次分配。
+func _sync_minimap() -> void:
+	if hud == null or maze == null or not is_instance_valid(player):
+		return
+	var me: Vector2 = player.global_position
+	var near := PackedVector2Array()
+	for e in _enemies:
+		if not is_instance_valid(e):
+			continue
+		var p: Vector2 = e.global_position
+		if p.distance_squared_to(me) <= Minimap.RADAR * Minimap.RADAR:
+			near.append(p)
+	var boss_pos: Vector2 = Vector2.ZERO
+	var has_boss: bool = _boss != null and is_instance_valid(_boss)
+	if has_boss:
+		boss_pos = _boss.global_position
+	var shop_pos: Vector2 = Vector2.ZERO
+	var has_shop: bool = _merchant != null and is_instance_valid(_merchant)
+	if has_shop:
+		shop_pos = _merchant.global_position
+	# 门只在"刚打完 Boss、等玩家挑"的那十几秒存在，直接全推。
+	var gates := PackedVector2Array()
+	for p in _portals:
+		if is_instance_valid(p):
+			gates.append(p.global_position)
+	hud.update_minimap(me, near, boss_pos, has_boss, shop_pos, has_shop, gates)
 
 
 func _update_hud() -> void:
