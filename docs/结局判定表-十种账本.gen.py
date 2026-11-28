@@ -222,7 +222,7 @@ for idx, (name, gate, lead, main_gate, cond, lines) in enumerate(ENDINGS):
     body_cell(es, r, 6, cond, align="left")
     c = body_cell(es, r, 7, lines, align="left")
     c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    es.row_dimensions[r].height = 46
+    es.row_dimensions[r].height = 60   # 收尾三行要装得下，46 会把第三行切掉一半
 
 es.freeze_panes = "A3"
 
