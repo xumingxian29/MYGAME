@@ -2802,6 +2802,22 @@ func _map_text() -> String:
 		Story.progress_text(_map_index), int(round((_power_scale() - 1.0) * 100.0)), _time_text()]
 
 
+## HUD 状态行（血条下面那一行）。**不带幕号**：上一行 set_stage 已经写了
+## 「第 N/10 幕 · 幕名」，这里再写一次，两行都以"第 1/10 幕"开头——
+## 桌面 1280 宽只是重复，844x390 的手机上两行挤在一起像串行。
+## 手机截图（.workbuddy/web_m_4_battle.png）里量出来的，不是推测。
+func _status_text() -> String:
+	if _gauntlet_total > 0:
+		# 王座厅没有难度增益可报，改成"还站着几位"——这里玩家的唯一问题是还要打几个
+		if _gauntlet_left > 0:
+			return "还站着 %d 位 · %s" % [_gauntlet_left, _time_text()]
+		return "城门已开 · %s" % _time_text()
+	if _floor <= 0:
+		return "探索 " + _time_text()
+	# 难度百分比直接写出来：只藏在数值里的话，玩家只会觉得"后面莫名其妙打不动了"。
+	return "敌 +%d%% · %s" % [int(round((_power_scale() - 1.0) * 100.0)), _time_text()]
+
+
 ## 离玩家最近的一扇门的位移。没有门时返回零向量（箭头会自动隐藏）。
 func _nearest_portal_offset() -> Vector2:
 	if not is_instance_valid(player):
@@ -2837,10 +2853,12 @@ func _update_hud() -> void:
 		hud.set_stage(_act_text(act_index), progress, boss_alive, Story.tint(act_index))
 	# 时间放进来是为了让老玩家还能对表：章节推进多少秒是可变节奏，
 	# 但"我这局撑了多久"仍然是排行榜和手感的共同基准。
-	hud.set_stats("%s  Lv.%d    击杀 %d    时间 %s" % [HeroClass.NAMES[_hero], _level, _kills, _time_text()])
+	# 玩家行不再带"时间"：上面状态行的"探索 00:07"和它是同一个 _elapsed，
+	# 手机截图里两行都顶着 00:07——同一个数写两遍，白占一行宽度。
+	hud.set_stats("%s  Lv.%d    击杀 %d" % [HeroClass.NAMES[_hero], _level, _kills])
 	hud.set_next_upgrade(_next_card_level)
 	hud.set_danger(_danger_level())
-	hud.set_zone_status(_map_text(), false)
+	hud.set_zone_status(_status_text(), false)
 	# 箭头复用：挑门时指向最近的门。门开在 Boss 尸体周围，玩家常常被击退到
 	# 走廊另一头，没有指向的话"四扇门已开"就只是一句横幅。其余时候零向量自动隐藏。
 	if _awaiting_portal:
