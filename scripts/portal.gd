@@ -20,6 +20,18 @@ signal request_enter(portal: Portal)
 ## HEAL 腾出来的位置给了双卡门——同样是"立刻变强"，但不碰血线。
 enum Reward { CARD, CARD2, BREACH, GOLD }
 
+## 四扇门不再"难度一样、只有奖励不同"。原来无论走哪扇，下一层都是 +10%，
+## 于是"选门"退化成"选奖励"——玩家永远挑最值的那扇，选择本身没有代价。
+## 现在每扇门自带难度增量，叠加到下一层的敌人强度上：
+##   单卡 +20%（最小）  破甲弹 +40%  金币 +60%  双卡 +100%（最大）
+## 奖励越强，进去的那张图越难。这才是"要不要赌一把"。
+const DIFFICULTY: Dictionary = {
+	Reward.CARD: 0.20,
+	Reward.BREACH: 0.40,
+	Reward.GOLD: 0.60,
+	Reward.CARD2: 1.00,
+}
+
 ## 环的半径。比玩家半径大得多：门要"看着能走进去"，而不是一个贴地的小图标。
 const RADIUS: float = 46.0
 ## 触发半径。比外环小一圈——贴着边缘擦过去不该被吸进去，
@@ -114,6 +126,15 @@ func reward_text() -> String:
 			return "额外一张卡"
 
 
+## 这扇门给下一层加多少难度（0.2 = +20%）。Game 进门时直接累加到难度系数上。
+func difficulty() -> float:
+	return float(DIFFICULTY.get(reward, 0.2))
+
+
+func difficulty_text() -> String:
+	return "+%d%%" % roundi(difficulty() * 100.0)
+
+
 ## 门的三层结构：外环（边界）、内旋涡（方向感）、中心符号（选的是什么）。
 ## 没开的时候整圈压暗且不转——"还不能进"必须一眼看出来，
 ## 否则玩家会站在门上等，以为游戏卡住了。
@@ -164,3 +185,12 @@ func _draw() -> void:
 				var off := Vector2(float(i - 1) * 7.0, float(i - 1) * -4.0)
 				var rect := Rect2(off - Vector2(6.0, 9.0), Vector2(12.0, 18.0))
 				draw_rect(rect, glyph, false, 1.8)
+
+	# 门上直接写"奖励 + 难度"。四扇门只靠图形区分（三张卡/五张卡/六边形/硬币）
+	# 在打完 Boss 满屏宝石的时候很难认，而"这扇进去要多难"更是图形表达不了的。
+	var font: Font = UiKit.font()
+	var text_alpha: float = 0.92 if _armed else 0.45
+	draw_string(font, Vector2(-70.0, RADIUS + 24.0), reward_text(),
+		HORIZONTAL_ALIGNMENT_CENTER, 140.0, 13, Color(1.0, 0.97, 0.92, text_alpha))
+	draw_string(font, Vector2(-70.0, RADIUS + 40.0), "难度 " + difficulty_text(),
+		HORIZONTAL_ALIGNMENT_CENTER, 140.0, 12, Color(1.0, 0.76, 0.60, 0.9 * text_alpha))

@@ -47,6 +47,13 @@ const BREACH_HIT_DAMAGE: float = 40.0
 ## 同一只 Boss 两次"吃弹"之间的最短间隔。轨道武器每帧都贴在 Boss 身上，
 ## 没有这个间隔一发弹只活 1/60 秒；有了它，上限就是每秒 4 发。
 const BREACH_LOCK_TIME: float = 0.25
+## 穿甲弹在窗口内命中时给窗口续多久。0.6 秒 = 玩家打两发的间隔，
+## 也就是说"手上有弹、打得够准"可以把一只 Boss 的窗口无限续住——
+## 这个上限由弹量控制，不由时间控制，所以不会出现"永远打不动/永远能打"的失衡。
+const AP_WINDOW_BONUS: float = 0.6
+## 窗口外命中：只给半额伤害，但会把 Boss 直接打进破甲。
+## 半额是为了让"开窗"本身有代价，不然最优解会变成"隔着壳无脑灌弹"。
+const AP_OPEN_DAMAGE_RATIO: float = 0.5
 ## 打在壳上的冷色闪光，和普通受击的白色闪光区分开：
 ## 白色代表"掉血了"，冷色代表"这一下没用"。
 const SHELL_FLASH_COLOR: Color = Color(0.72, 0.82, 1.0)
@@ -684,6 +691,16 @@ func _boss_strike_point() -> Vector2:
 	return target.global_position + lead
 
 
+## 壳挡下普通弹时的反馈：冷色闪光 + 节流。
+## 只做视觉，不扣任何资源——"打早了"不该惩罚玩家，只该告诉他"现在打不进"。
+func _shell_reject() -> void:
+	if _breach_lock_t > 0.0:
+		return
+	_breach_lock_t = 0.35
+	_flash_shell = true
+	_flash_t = FLASH_TIME
+
+
 ## 破甲窗口判定。Game / HUD / 武器都读它，是"能不能伤到它"的唯一答案。
 func is_vulnerable() -> bool:
 	return kind == Kind.BOSS and _boss_state == BOSS_STATE_VULNERABLE
@@ -781,33 +798,32 @@ func _boss_shock(shock_radius: float, shock_damage: float) -> void:
 		target.call("take_damage", shock_damage * power_scale)
 
 
-func take_damage(amount: float, bypass_shell: bool = false) -> void:
+func take_damage(amount: float, bypass_shell: bool = false, ap: bool = false) -> void:
 	if _dead:
 		return
-	# Boss 有壳：普通武器/技能的伤害打不进去，只能靠破甲弹，而且**只在破甲窗口里**。
+	# Boss 有壳：普通武器/技能的伤害打不进去，只有**穿甲弹**能穿。
 	# 判定放在这里而不是在每个武器里，是因为伤害入口只有这一条——
 	# 将来加新武器不需要记得"要不要处理 Boss"。
-	if kind == Kind.BOSS and not bypass_shell and breach_gate.is_valid():
-		if not is_vulnerable():
-			# 出招/追击期间壳是完整的：不扣血、**也不扣弹**。
-			# 不扣弹这一条很重要——否则"打早了"会白扔资源，玩家会变成不敢开枪。
-			# 冷色闪光按 0.35 秒节流：轨道武器每秒 60 次贴着打，
+	#
+	# 旧版是"只在破甲窗口里 + 命中才扣弹"，结果是：窗口外打上去毫无反应，
+	# 玩家捡了一堆弹却不知道该什么时候用，存在感全靠一行状态字。
+	# 现在改成"弹在开火时就已经花掉了"，命中一定有效果：
+	#   窗口内 → 满额，并把窗口往后延一点点（有弹就能一直把窗口续住）
+	#   窗口外 → 半额，但**立刻把 Boss 打进破甲**——花一发弹，主动创造一个输出窗口
+	if kind == Kind.BOSS and not bypass_shell:
+		if not ap:
+			# 普通弹：不扣血。冷色闪光按 0.35 秒节流——轨道武器每秒 60 次贴着打，
 			# 不节流的话 Boss 会被常亮成一片蓝色，反而看不出"没打进去"。
-			if _breach_lock_t <= 0.0:
-				_breach_lock_t = 0.35
-				_flash_shell = true
-				_flash_t = FLASH_TIME
+			_shell_reject()
 			return
-		if _breach_lock_t > 0.0:
-			# 锁定期内静默忽略：不扣弹、不闪壳、不发声。
-			# 否则轨道武器贴着 Boss 每秒 60 次"叮叮叮"，玩家会以为弹白扔了。
-			return
-		if not bool(breach_gate.call()):
-			_flash_shell = true
-			_flash_t = FLASH_TIME
-			return
-		_breach_lock_t = BREACH_LOCK_TIME
-		amount = BREACH_HIT_DAMAGE
+		if is_vulnerable():
+			amount = BREACH_HIT_DAMAGE
+			# _boss_state_t 是"已进入窗口多久"，往回拨等于让窗口更长。
+			# 上限就是 BOSS_VULN_TIME，不会越打越长。
+			_boss_state_t = maxf(_boss_state_t - AP_WINDOW_BONUS, 0.0)
+		else:
+			amount = BREACH_HIT_DAMAGE * AP_OPEN_DAMAGE_RATIO
+			_enter_boss_state(BOSS_STATE_VULNERABLE)
 	_flash_shell = false
 	_health -= amount
 	# 致死那一击也要出火花，所以先发 hit 再判死

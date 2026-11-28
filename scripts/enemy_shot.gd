@@ -10,6 +10,9 @@ const TARGET_RADIUS: float = 16.0
 ## 超时时间：飞出视野太久的一定打不到人，留着只是拖性能
 const LIFETIME: float = 4.5
 
+## 迷宫引用，由 Game 生成时注入。敌人子弹同样不能穿墙：
+## 否则躲在拐角后面反而更危险，因为你看不见它、它却打得中你。
+var maze: MazeMap = null
 var velocity: Vector2 = Vector2.ZERO
 var damage: float = 8.0
 var target: Node2D = null
@@ -33,6 +36,9 @@ func _physics_process(delta: float) -> void:
 		return
 
 	global_position += velocity * delta
+	if maze != null and not maze.has_floor_at(global_position):
+		queue_free()
+		return
 	_tick_homing(delta)
 
 	if not is_instance_valid(target):

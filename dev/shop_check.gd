@@ -4,7 +4,7 @@ extends SceneTree
 ## 用法：godot --headless --path . --fixed-fps 60 --script res://dev/shop_check.gd
 ##
 ## 覆盖五件事：
-##   1. 击杀给金币：普通 2 / 精英 8 / Boss 40
+##   1. 击杀给金币：普通 6 / 精英 24 / Boss 120，且随层数上涨
 ##   2. 走近商人 → SHOP 态 + 面板打开 + 整棵树暂停
 ##   3. 金币不足：直接调购买会被拒绝，一分钱不扣、货还在
 ##   4. 金币充足：扣钱、发货、售罄；同一件不能买第二次
@@ -44,17 +44,17 @@ func _run() -> void:
 	game._gold = 0
 	game._create_enemy(Enemy.Kind.GRUNT, false, game.player.global_position + Vector2(500.0, 0.0))
 	var grunt: Enemy = game._enemies[game._enemies.size() - 1]
-	_check("普通怪值 2 金", game._coin_reward(grunt) == 2, "%d" % game._coin_reward(grunt))
+	_check("普通怪值 6 金", game._coin_reward(grunt) == 6, "%d" % game._coin_reward(grunt))
 	game._create_enemy(Enemy.Kind.GRUNT, true, game.player.global_position + Vector2(520.0, 0.0))
 	var elite: Enemy = game._enemies[game._enemies.size() - 1]
-	_check("精英值 8 金", game._coin_reward(elite) == 8, "%d" % game._coin_reward(elite))
+	_check("精英值 24 金", game._coin_reward(elite) == 24, "%d" % game._coin_reward(elite))
 	game._create_enemy(Enemy.Kind.CHARGER, false, game.player.global_position + Vector2(540.0, 0.0))
 	var charger: Enemy = game._enemies[game._enemies.size() - 1]
-	_check("冲锋者也值 3 金", game._coin_reward(charger) == 3, "%d" % game._coin_reward(charger))
+	_check("冲锋者也值 9 金", game._coin_reward(charger) == 9, "%d" % game._coin_reward(charger))
 	# 走真实死亡路径，验金币真的进账
 	var gold_before: int = game._gold
 	game._on_enemy_died(grunt, 4)
-	_check("击杀真的加钱", game._gold == gold_before + 2, "%d → %d" % [gold_before, game._gold])
+	_check("击杀真的加钱", game._gold == gold_before + 6, "%d → %d" % [gold_before, game._gold])
 	for e in game._enemies:
 		if is_instance_valid(e):
 			e.queue_free()
@@ -82,12 +82,16 @@ func _run() -> void:
 	_check("钱不够时货没被标记售罄", bool(game._shop_stock[0]["bought"]) == false)
 
 	print("\n[回血：扣钱 + 发货 + 售罄]")
-	game._gold = 500
+	# 价格 ×10 之后，一次购买要 1600 金；测试直接给够。
+	game._gold = 5000
 	game.player.health = game.player.max_health * 0.3
 	var hp_at: float = game.player.health
 	game._on_shop_buy(0)
-	_check("扣了 160 金", game._gold == 340, "%d" % game._gold)
-	_check("回了 40% 生命", game.player.health > hp_at + game.player.max_health * 0.3,
+	_check("第 1 图扣 1600 金", game._gold == 3400, "%d" % game._gold)
+	# 前三关固定 5% 最大生命（买之前血池 180 → 回 9 点）
+	var want_heal: float = game.player.max_health * 0.05
+	_check("前三关只回 5%%（%.1f 点）" % want_heal,
+		is_equal_approx(game.player.health, hp_at + want_heal),
 		"%.1f → %.1f" % [hp_at, game.player.health])
 	_check("回血已售罄", bool(game._shop_stock[0]["bought"]) == true)
 	var gold_after: int = game._gold
@@ -98,7 +102,7 @@ func _run() -> void:
 	var breach_at: int = game._breach
 	game._on_shop_buy(1)
 	_check("破甲弹 +3", game._breach == breach_at + 3, "%d → %d" % [breach_at, game._breach])
-	_check("破甲弹扣 60 金", game._gold == 280, "%d" % game._gold)
+	_check("破甲弹扣 600 金", game._gold == 2800, "%d" % game._gold)
 
 	print("\n[关店]")
 	game._close_shop()
@@ -140,3 +144,33 @@ func _run() -> void:
 		if bool(item["bought"]):
 			fresh_all = false
 	_check("新图货架全部重置", fresh_all)
+
+	print("\n[价格随层数上涨 + 后期固定回血]")
+	# 第 1 图：基准价 1600
+	game._floor = 0
+	game._floor_power = 0.0
+	game._shop_stock_reset()
+	_check("第 1 图药价 1600", int(game._shop_stock[0]["price"]) == 1600,
+		"%d" % int(game._shop_stock[0]["price"]))
+	# 第 4 图（_floor = 3）：1600 × (1 + 0.45×3) = 3760
+	game._floor = 3
+	game._shop_stock_reset()
+	var want_price: int = int(round(1600.0 * (1.0 + 0.45 * 3.0)))
+	_check("第 4 图药价涨到 %d" % want_price,
+		int(game._shop_stock[0]["price"]) == want_price,
+		"%d" % int(game._shop_stock[0]["price"]))
+	_check("药价严格高于第 1 图", int(game._shop_stock[0]["price"]) > 1600)
+
+	# 回血量：前三关 5%，第 4 关起固定 100
+	game._floor = 2
+	_check("第 3 图仍是 5%%（%.1f 点）" % (game.player.max_health * 0.05),
+		is_equal_approx(game._shop_heal_amount(), game.player.max_health * 0.05),
+		"%.1f" % game._shop_heal_amount())
+	game._floor = 3
+	_check("第 4 图起固定 100 点",
+		is_equal_approx(game._shop_heal_amount(), 100.0),
+		"%.1f" % game._shop_heal_amount())
+	_check("第 4 图的面板文案写 100", game._shop_heal_text().contains("100"),
+		"「%s」" % game._shop_heal_text())
+	game._floor = 0
+	game._shop_stock_reset()

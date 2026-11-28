@@ -6,6 +6,16 @@ extends Node2D
 
 ## 由 Player 注入的敌人列表引用
 var enemies: Array[Enemy] = []
+## 迷宫引用，由 Player 注入。攻击不能穿墙：子弹飞进不可走格就消失。
+## 这是"墙是墙"的最后一块——玩家和怪都不能穿墙之后，
+## 只有子弹还能隔着墙打死人，那墙就只挡走位、不挡战术，变成半个装饰。
+var maze: MazeMap = null
+## 破甲弹（穿甲弹）的两个回调，由 Player 注入：
+##   breach_count() → 还剩几发；breach_take() → 花掉一发，返回是否成功。
+## 用 Callable 而不是共享一个 int，是因为库存的真身在 Game 里，
+## 武器只该"问一句、要一发"，不该自己维护第二份计数器。
+var breach_count: Callable = Callable()
+var breach_take: Callable = Callable()
 
 @export var damage: float = 14.0
 @export var interval: float = 0.5
@@ -87,10 +97,23 @@ func _nearest_enemy() -> Enemy:
 	return boss if boss != null else best
 
 
+## 这次开火要不要吃一发破甲弹。整次开火最多花一发（散射 8 发也只花一发），
+## 否则弹数越高的流派会瞬间把库存烧光，反而更不会被玩家捡。
+func _take_ap() -> bool:
+	if not breach_count.is_valid() or not breach_take.is_valid():
+		return false
+	if int(breach_count.call()) <= 0:
+		return false
+	return bool(breach_take.call())
+
+
 func _fire_at(target_pos: Vector2) -> void:
 	var dir: Vector2 = (target_pos - global_position).normalized()
 	if dir == Vector2.ZERO:
 		dir = Vector2.RIGHT
+	var ap: bool = _take_ap()
+	var shot_damage: float = damage * (Player.AP_DAMAGE_SCALE if ap else 1.0)
+	var shot_pierce: int = pierce + (2 if ap else 0)
 	var count: int = maxi(projectiles_per_shot, 1)
 	var spread: float = deg_to_rad(9.0)
 	for i in range(count):
@@ -104,8 +127,9 @@ func _fire_at(target_pos: Vector2) -> void:
 			"plpos": Vector2.ZERO,
 			"vel": dir.rotated(offset) * projectile_speed,
 			"life": SHOT_LIFETIME,
-			"damage": damage,
-			"pierce": pierce,
+			"damage": shot_damage,
+			"pierce": shot_pierce,
+			"ap": ap,
 			"hits": [],
 		})
 
@@ -127,6 +151,10 @@ func _update_shots(delta: float) -> void:
 		shot["life"] = float(shot["life"]) - delta
 
 		var remove: bool = float(shot["life"]) <= 0.0
+		# 撞墙即消失。先判墙再判命中：一支已经飞进墙里的弹不该再结算命中，
+		# 否则墙后贴着的怪会莫名其妙掉血。
+		if not remove and maze != null and not maze.has_floor_at(pos):
+			remove = true
 		if not remove:
 			remove = _resolve_hit(shot, pos, vel)
 		if remove:
@@ -149,7 +177,7 @@ func _resolve_hit(shot: Dictionary, pos: Vector2, vel: Vector2) -> bool:
 			continue
 		if _segment_distance(prev_pos, pos, enemy.global_position) > enemy.radius + HIT_RADIUS_PAD:
 			continue
-		enemy.take_damage(float(shot["damage"]))
+		enemy.take_damage(float(shot["damage"]), false, bool(shot.get("ap", false)))
 		if slow_time > 0.0:
 			enemy.apply_slow(slow_time, slow_factor)
 		hit_keys.append(enemy.spawn_serial)
@@ -210,7 +238,12 @@ func _draw() -> void:
 	var f: float = Engine.get_physics_interpolation_fraction()
 	for shot in _shots:
 		var shot_pos: Vector2 = (shot["plpos"] as Vector2).lerp(shot["lpos"], f)
-		var tail: Vector2 = (shot["vel"] as Vector2).normalized() * shot_radius * 3.4
-		draw_line(shot_pos - tail, shot_pos, Color(shot_color.r, shot_color.g, shot_color.b, 0.45), shot_radius * 0.9, true)
-		draw_circle(shot_pos, shot_radius * 1.9, Color(shot_color.r, shot_color.g, shot_color.b, 0.2))
-		draw_circle(shot_pos, shot_radius, shot_color)
+		# 穿甲弹换成金色并放大约 1.4 倍：玩家必须"看得见自己花掉了一发"，
+		# 否则库存从 12 掉到 11 这件事在混战里根本没人会注意。
+		var ap: bool = bool(shot.get("ap", false))
+		var col: Color = Color(1.0, 0.82, 0.32) if ap else shot_color
+		var rad: float = shot_radius * (1.4 if ap else 1.0)
+		var tail: Vector2 = (shot["vel"] as Vector2).normalized() * rad * 3.4
+		draw_line(shot_pos - tail, shot_pos, Color(col.r, col.g, col.b, 0.45), rad * 0.9, true)
+		draw_circle(shot_pos, rad * 1.9, Color(col.r, col.g, col.b, 0.2))
+		draw_circle(shot_pos, rad, col)

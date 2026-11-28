@@ -81,9 +81,9 @@ const BUDGET_STEP: float = 5.5
 ## 视野内敌人上限。与上面的全场预算分开：预算是"屏外可以排队多少"，
 ## 这条是"画面里同时最多几只"。玩家对看不见的东西没有压力感，
 ## 屏外堆 80 只只会让台架数据好看、手感没有任何变化。
-## 20 是"围得上但还能走出去"的量级；9 房间的图里一个房间 4~6 只，
-## 同时挤进视野说明玩家已经停在走廊里被前后夹了。
-const VISIBLE_ENEMY_CAP: int = 20
+## 20 → 40：20 那一版实测在后期"打着打着画面空了"，走廊两侧的怪被推得太干净，
+## 连击手感断掉。40 仍然是"看得见来源"的量级，不至于变成一堵墙。
+const VISIBLE_ENEMY_CAP: int = 40
 ## Boss 战单独收紧到 10。Boss 的攻防循环本身就要占掉全部注意力，
 ## 再加十几只小弟就不是"读招"，是"被推着走"。
 const BOSS_FIGHT_ENEMY_CAP: int = 10
@@ -92,8 +92,9 @@ const BOSS_FIGHT_ENEMY_CAP: int = 10
 const VISIBLE_CAP_TICK: float = 0.25
 ## 屏外允许排队的数量。不设这条的话，全场上限仍是 79，屏外会一直堆着
 ## 五十多只等着往视野里挤，驱逐逻辑每 0.25 秒就要推一次，边缘看起来像在抖。
-## 留 14 只缓冲：足够补位，又不至于让"推回去"变成常态。
-const ENEMY_OVERFLOW_ALLOWANCE: int = 14
+## 视野上限抬到 40 之后缓冲也跟着放宽到 20：比例还是 1:0.5，
+## 缓冲太薄的话"补位"会跟不上 40 只的消耗速度，画面会一阵一阵地空。
+const ENEMY_OVERFLOW_ALLOWANCE: int = 20
 const ENEMY_HP_BASE: float = 9.0
 ## 敌人血量 = BASE + 线性项 + 二次项。纯线性追不上后期的卡牌成长：
 ## 实测 300 秒时玩家 19 张卡、血量还剩 161/274，等于后期没有威胁。
@@ -142,20 +143,29 @@ const ELITE_CHANCE: float = 0.12
 ## 只作用于普通怪（含精英）与它们的伤害，不作用于 Boss：
 ## Boss 血量 = 破甲弹发数 × 固定 40，随难度乘会直接破坏"捡几发打几下"的配平，
 ## Boss 的成长走 Stage 表自己的 hp_scale / breach_shots 曲线。
-const FLOOR_POWER_STEP: float = 1.10
-## 速度单独封顶。1.10^N 一路乘下去，第 6 张图怪速就超过玩家，风筝流直接失效；
-## 更糟的是"跑不掉"不是难度，是判死刑。所以速度只吃前 5 层的加成，停在 1.5×。
+## 每层的增量不再固定 +10%，改由"走的是哪扇门"决定（见 Portal.DIFFICULTY）。
+## 速度单独封顶。连乘几次之后怪速会超过玩家，风筝流直接失效；
+## 更糟的是"跑不掉"不是难度，是判死刑。所以速度只吃前几层的加成，停在 1.5×。
 const FLOOR_SPEED_CAP: float = 1.5
 
-## 商人三件货。价格按"一张图的收入"定：
-## 一张图约 250 击杀（普通 2 金）+ 一个 Boss（40）= 540 金左右。
-## 回血 160 = 大约前 80 秒的全部收入，是这一排里最贵的一件——
-## 它换的是"再撑一段"，而卡和弹换的是"打得更快"，前者本来就该更贵。
-## 破甲弹 60 最便宜：它是 Boss 战的入场券，不该让玩家因为穷而卡关。
-const SHOP_HEAL_RATIO: float = 0.40
-const SHOP_HEAL_PRICE: int = 160
-const SHOP_BREACH_PRICE: int = 60
-const SHOP_CARD_PRICE: int = 120
+## 商人三件货。价格整体 ×10：原来的 160 金在"一张图 540 金"的尺度下，
+## 半张图的收入就能拿一瓶药，商人退化成了自动售货机。
+## 现在 1600 金 ≈ 一整张图的收入，买药变成"这趟还要不要继续"的决定。
+## 破甲弹仍然最便宜：它是 Boss 战的入场券，不该让玩家因为穷而卡关。
+const SHOP_HEAL_PRICE: int = 1600
+const SHOP_BREACH_PRICE: int = 600
+const SHOP_CARD_PRICE: int = 1200
+
+## 价格随"第几张图"上涨，不随"活了多久"——玩家能理解"越深越贵"，
+## 理解不了"同一瓶药过两分钟就涨价"。
+const SHOP_PRICE_STEP: float = 0.45
+
+## 回血量分两段：前三关（第 1~3 图）固定 5% 最大生命，第 4 图起固定 100 点。
+## 早期血池小，5% 基本是"擦破皮"，逼玩家别把商人当回血站；
+## 后期血池被卡牌抬到 300+，固定 100 点占比自然缩水，同样在收紧。
+const SHOP_HEAL_RATIO_EARLY: float = 0.05
+const SHOP_HEAL_FLAT_LATE: float = 100.0
+const SHOP_HEAL_FLAT_FROM_FLOOR: int = 3
 
 ## Boss 战期间破甲弹掉落的加速倍率（乘在 breach_every 上）。
 ## 不加这一条会出人命：Boss 站着不动等你打，玩家手上没弹又等不到掉落，
@@ -223,7 +233,10 @@ const XP_GROWTH: float = 1.18
 ## 升级**不再回血**。原来的 6% 让"刷经验"同时是续航手段，等于把"缺血"这件事
 ## 从游戏里删掉了：只要还在升级，血线就自己回来，商人和回血道具都没有存在意义。
 ## 现在回血只有四个来源：脱战自然回复、Boss 战后 15%、通关补满、商人。
-const GOLD_BASE_KILL: int = 2
+const GOLD_BASE_KILL: int = 6
+## 金币也随层数涨，但涨得比价格慢（0.30 vs 0.45）：两者同速的话，
+## "越深越贵"就只剩下数字变大，实际负担一点没变。
+const GOLD_FLOOR_STEP: float = 0.30
 
 ## 升级卡数据表。unit：flat 固定值 / pct 百分比 / count 整数层数 / unlock 解锁
 const CARDS: Array[Dictionary] = [
@@ -267,12 +280,18 @@ var _hud_timer: float = 0.0
 var world: Node2D
 
 var _enemies: Array[Enemy] = []
+## 属性的"出厂值"与"原始加成账本"。两者都由 _capture_stat_bases 在开局建立，
+## 之后每张卡只往账本里加数，最终值永远从出厂值重算——这样上限不会因为
+## "中途拿现在的值当新基准"而失效（那是数值系统里最经典的一类漏洞）。
+var _stat_base: Dictionary = {}
+var _stat_raw: Dictionary = {}
 ## 本局的下一个敌人序号。每局归零，保证同一局内"序号 → 生成顺序"完全可复现。
 var _next_serial: int = 0
 var _gems: Array[XpGem] = []
 ## 地上还没被捡走的破甲弹
 var _items: Array[ItemModule] = []
-## 手上还有几发破甲弹。**只在打 Boss 时消耗**，所以它是一局里唯一的"Boss 输出预算"
+## 手上还有几发破甲弹。**每次攻击花一发**（开火/挥砍/投掷各算一次），
+## 所以它既是"Boss 输出预算"，也是"清场时要不要加码"的选择。
 var _breach: int = 0
 ## 本局金币。跨图保留、跨局归零：它是"这一局的经营成果"，
 ## 换图清零等于逼玩家每张图都攒到刚好花完，那不叫经营，叫算术题。
@@ -308,11 +327,15 @@ var maze: MazeMap = null
 
 ## 第几张地图。三个传送门每次换图 +1，HUD 与结算面板都读它。
 var _map_index: int = 0
-## 已经穿过几道传送门。难度乘数 = FLOOR_POWER_STEP ^ _floor。
+## 已经穿过几道传送门。
 ## 和 _map_index 分开记：_map_index 是"玩家看到第几张图"（含第一张，从 0 起），
-## _floor 是"被放大过几次"（第一张图是 0 次）。两者数值恰好相同但语义不同，
-## 将来加"回退一层"之类的机制时，只有 _floor 该动。
+## _floor 是"被放大过几次"（第一张图是 0 次）。两者数值恰好相同但语义不同。
 var _floor: int = 0
+## 累计难度增量。原来是 FLOOR_POWER_STEP ^ _floor（每层固定 +10%），
+## 现在由"走的是哪扇门"决定——四扇门的增量从 +20% 到 +100% 不等，
+## **加法累加**而不是连乘：连乘在 +100% 那扇门之后会直接翻倍再翻倍，
+## 五层就到 32 倍，那是"选错一次就死"，不是选择。
+var _floor_power: float = 0.0
 ## Boss 已死、四扇门已开、等玩家选门的这段"间隙"。
 ## 它必须独立成一个标记，不能靠 _boss == null 判断：_boss 在战斗间隙也常是 null。
 ## 这个状态下停刷、停 Boss 检查、也不推进章节时钟——玩家可以慢慢挑门。
@@ -589,6 +612,7 @@ func _begin_run() -> void:
 	_awaiting_portal = false
 	_portals.clear()
 	_floor = 0
+	_floor_power = 0.0
 	_stage_index = 0
 	_stage_time = 0.0
 	_cleared = false
@@ -653,6 +677,10 @@ func _spawn_player() -> void:
 	player.mana_changed.connect(hud.set_mana)
 	player.died.connect(_on_player_died)
 	player.audio = audio
+	# 破甲弹的库存真身在本类；武器拿到的是"还剩几发 / 花掉一发"两个回调。
+	# 换武器、换职业都不需要重新接线——回调永远指向这一个计数器。
+	player.breach_count = func() -> int: return _breach
+	player.breach_take = _consume_breach
 	player.mana_changed.connect(_on_mana_changed)
 	# 自动攻击的音效只给"低频动作"：近战 1.6 次/秒、回旋镖 1 次/秒左右。
 	# 子弹是 5 发/秒，逐发配音会变成一段单调的噪声墙，所以射手不配发射音——
@@ -668,6 +696,8 @@ func _spawn_player() -> void:
 	hud.set_hero(_hero)
 	hud.set_health(player.health, player.max_health)
 	hud.set_mana(player.mana, player.max_mana)
+	# 出厂值必须在"武器已经按职业装配好、还没有任何卡生效"的这一刻抓
+	_capture_stat_bases()
 
 
 ## 蓝满只在"第一次"值得提示：之后玩家已经知道技能键在哪，
@@ -925,7 +955,7 @@ func _threat() -> float:
 ## 单独一个函数而不是散在 _create_enemy 里：吐息伤害、Boss 召唤物、自检脚本
 ## 都要读同一个数，写两遍迟早对不上。
 func _power_scale() -> float:
-	return pow(FLOOR_POWER_STEP, float(_floor))
+	return 1.0 + _floor_power
 
 
 func _create_enemy(kind: int, big: bool, at: Vector2, minion: bool = false) -> void:
@@ -1028,7 +1058,6 @@ func _spawn_boss() -> void:
 	boss.target = player
 	# 壳的判定注入给 Boss 自己：Game 不在每个武器的伤害路径上做判断，
 	# 只在"这一发弹还在不在"这一件事上说话。
-	boss.breach_gate = _consume_breach
 	# 出场定身：Boss 从视野外走进来的那 1.1 秒不出招，
 	# 玩家需要用这一秒确认"它来了、它叫什么、血条在哪"。
 	boss.boss_intro_t = Enemy.BOSS_INTRO_TIME
@@ -1062,7 +1091,8 @@ func _spawn_boss() -> void:
 		# 横幅已经说了"它是什么"，这里只补横幅没说、但必须知道的机制：
 		# 壳 + 窗口 + 回血。不知道"打不动"的玩家会以为游戏卡了；
 		# 不知道"只有窗口能打"的玩家会一直贴着它开枪，然后以为弹是坏的。
-		tutorial.notify("boss", "它有壳：出招时打不进 · 只在它破甲的几秒用破甲弹打", "", 3.6)
+		tutorial.notify("boss", "它有壳：普通攻击打不进 · 穿甲弹随时能打，还能把它打穿",
+			"", 3.8)
 	hud.show_banner("关底 · " + boss_name, Stage.boss_hint(boss_name), Stage.tint(_stage_index), false)
 	# 立刻刷一次 HUD：章节条要当场变成"关底"，
 	# 等 10Hz 的节流刷新会有最多 0.1 秒的延迟，玩家会先看到 Boss 出场再看到条变红
@@ -1139,6 +1169,7 @@ func _on_boss_barrage(at: Vector2, count: int) -> void:
 		var dir: Vector2 = Vector2(cos(angle), sin(angle))
 		var shot := EnemyShot.new()
 		shot.target = player
+		shot.maze = maze
 		shot.velocity = dir * BOSS_SHOT_SPEED
 		shot.damage = BOSS_SHOT_DAMAGE
 		# 暗红色弹体：和吐息者的青绿弹区分开，玩家靠颜色就能判断优先级
@@ -1177,6 +1208,7 @@ func _on_boss_homing(at: Vector2, count: int) -> void:
 		var dir: Vector2 = to_player.rotated(spread)
 		var shot := EnemyShot.new()
 		shot.target = player
+		shot.maze = maze
 		shot.velocity = dir * BOSS_HOMING_SPEED
 		shot.damage = BOSS_HOMING_DAMAGE
 		shot.homing_turn = BOSS_HOMING_TURN
@@ -1279,8 +1311,10 @@ func _open_portals(at: Vector2) -> void:
 	# 极端情况下（整张图只有一条 1 格宽走廊）位置凑不够：宁可贴着中心放，
 	# 也不能少一扇门——玩家会以为没开门，直接卡死在这一层。
 	while slots.size() < rewards.size():
-		slots.append(center + Vector2.RIGHT.rotated(
-			TAU * float(slots.size()) / float(rewards.size())) * 70.0)
+		var fallback: Vector2 = center + Vector2.RIGHT.rotated(
+			TAU * float(slots.size()) / float(rewards.size())) * 70.0
+		# 兜底位置也要过一遍可走判断：门开在墙里 = 玩家点得到却进不去。
+		slots.append(maze.nearest_floor_point(fallback) if maze != null else fallback)
 
 	for i in range(rewards.size()):
 		var portal := Portal.new()
@@ -1295,7 +1329,7 @@ func _open_portals(at: Vector2) -> void:
 	# 横幅要说"现在该干什么"。只说"Boss 已击败"等于把玩家扔在原地。
 	if audio != null:
 		audio.play("clear")
-	hud.show_banner("四扇门已开", "走进任意一扇 · 每深入一张图，敌人全部属性 +10%",
+	hud.show_banner("四扇门已开", "奖励越好的门，下一张图越难（+20% ~ +100%）",
 		Stage.tint(_stage_index), true)
 
 
@@ -1307,7 +1341,9 @@ func _on_portal_requested(portal: Portal) -> void:
 		return
 	_pending_portal = portal
 	_state = State.CONFIRM
-	var next_power: float = pow(FLOOR_POWER_STEP, float(_floor + 1))
+	# 提示里给的是"走这扇门之后"的累计数值，不是增量：
+	# 玩家真正要判断的是"下一张图有多难"，"+40%" 单独看没有参照。
+	var next_power: float = 1.0 + _floor_power + portal.difficulty()
 	hud.open_portal_confirm(portal.reward_text(), _map_index + 1,
 		int(round((next_power - 1.0) * 100.0)))
 	_sync_pause()
@@ -1330,6 +1366,7 @@ func _confirm_portal() -> void:
 	_portals.clear()
 	portal.consume()
 	_grant_portal_reward(reward)
+	_floor_power += portal.difficulty()
 	_floor += 1
 	_map_index += 1
 	_advance_stage()
@@ -1373,16 +1410,37 @@ func _shop_stock_reset() -> void:
 	_shop_stock.clear()
 	_shop_stock.append({
 		"id": "heal", "name": "治疗药剂",
-		"desc": "回复 40% 最大生命", "price": SHOP_HEAL_PRICE, "bought": false,
+		"desc": _shop_heal_text(), "price": _shop_price(SHOP_HEAL_PRICE), "bought": false,
 	})
 	_shop_stock.append({
 		"id": "breach", "name": "破甲弹 ×3",
-		"desc": "打穿 Boss 的壳，只有它做得到", "price": SHOP_BREACH_PRICE, "bought": false,
+		"desc": "装填到武器上，普通攻击自动变成穿甲弹", "price": _shop_price(SHOP_BREACH_PRICE), "bought": false,
 	})
 	_shop_stock.append({
 		"id": "card", "name": "战术手册",
-		"desc": "立刻拿到一张升级卡", "price": SHOP_CARD_PRICE, "bought": false,
+		"desc": "立刻拿到一张升级卡", "price": _shop_price(SHOP_CARD_PRICE), "bought": false,
 	})
+
+
+## 价格随层数上涨。四舍五入到整数：面板上写 1634 比 1633.6 更像个价签。
+func _shop_price(base: int) -> int:
+	return int(round(float(base) * (1.0 + SHOP_PRICE_STEP * float(_floor))))
+
+
+## 这一关药回多少血：前三关 5% 最大生命，第 4 图起固定 100 点。
+## 写成函数而不是常量，是因为它同时被"货架说明"和"买入结算"两处读，
+## 分开写迟早出现"面板写 100、实际回 5%"。
+func _shop_heal_amount() -> float:
+	if _floor < SHOP_HEAL_FLAT_FROM_FLOOR:
+		var pool: float = player.max_health if is_instance_valid(player) else 180.0
+		return pool * SHOP_HEAL_RATIO_EARLY
+	return SHOP_HEAL_FLAT_LATE
+
+
+func _shop_heal_text() -> String:
+	if _floor < SHOP_HEAL_FLAT_FROM_FLOOR:
+		return "回复 5%% 最大生命（%d 点）" % roundi(_shop_heal_amount())
+	return "回复 %d 点生命" % roundi(_shop_heal_amount())
 
 
 func _on_merchant_request(merchant: Merchant) -> void:
@@ -1416,7 +1474,7 @@ func _on_shop_buy(index: int) -> void:
 	match str(item["id"]):
 		"heal":
 			if is_instance_valid(player):
-				player.heal(player.max_health * SHOP_HEAL_RATIO)
+				player.heal(_shop_heal_amount())
 		"breach":
 			_breach += 3
 			if hud != null:
@@ -1586,6 +1644,7 @@ func _on_enemy_spit(at: Vector2, direction: Vector2) -> void:
 		return
 	var shot := EnemyShot.new()
 	shot.target = player
+	shot.maze = maze
 	shot.velocity = direction * SPIT_SPEED
 	shot.damage = SPIT_DAMAGE * _power_scale()
 	world.add_child(shot)
@@ -1724,15 +1783,18 @@ func _cull_far_enemies() -> void:
 ## 而不是一个精确到个位的经济体。精英 8 是普通怪的 4 倍，
 ## 和它 xp_value 的 3 倍大致同步——"打精英划算"这件事要在所有资源上都成立。
 func _coin_reward(enemy: Enemy) -> int:
+	var base: int
 	if enemy.kind == Enemy.Kind.BOSS:
-		return 40
-	if enemy.tier > 0:
-		return 8
-	# 特殊怪（冲锋者 / 吐息者 / 自爆怪）多给 1 块：它们更难处理，
+		base = 120
+	elif enemy.tier > 0:
+		base = 24
+	# 特殊怪（冲锋者 / 吐息者 / 自爆怪）多给一份：它们更难处理，
 	# 而"优先点掉吐息者"这件事必须在金币上也划算，否则玩家只会挑软的打。
-	if enemy.kind == Enemy.Kind.GRUNT:
-		return GOLD_BASE_KILL
-	return GOLD_BASE_KILL + 1
+	elif enemy.kind == Enemy.Kind.GRUNT:
+		base = GOLD_BASE_KILL
+	else:
+		base = GOLD_BASE_KILL + 3
+	return maxi(int(round(float(base) * (1.0 + GOLD_FLOOR_STEP * float(_floor)))), 1)
 
 
 func _add_gold(amount: int) -> void:
@@ -1819,7 +1881,9 @@ func _spawn_gem(at: Vector2, value: int) -> void:
 	gem.target = player
 	gem.collected.connect(_on_gem_collected)
 	world.add_child(gem)
-	gem.global_position = at
+	# 宝石统一在这里夹一次：它是"唯一入口"，从敌人死亡点、Boss 爆宝石、
+	# 以及将来的宝箱都要走这条路径，散在各处夹迟早漏一个。
+	gem.global_position = _clamp_into_walkable(at)
 	gem.reset_physics_interpolation()
 	_gems.append(gem)
 
@@ -1863,7 +1927,7 @@ func _spawn_breach(at: Vector2) -> void:
 	item.target = player
 	item.collected.connect(_on_item_collected)
 	world.add_child(item)
-	item.global_position = at
+	item.global_position = _clamp_into_walkable(at)
 	item.reset_physics_interpolation()
 	_items.append(item)
 
@@ -1876,10 +1940,12 @@ func _on_item_collected(item: ItemModule) -> void:
 	if audio != null:
 		audio.play("pickup")
 	if tutorial != null:
-		tutorial.notify("breach", "破甲弹：Boss 的壳只有它能打穿，按发消耗", "", 3.0)
+		tutorial.notify("breach",
+			"破甲弹：会自动装填 · 下一次攻击变成穿甲弹（消耗 1 发）", "", 3.2)
 
 
-## Boss 每"吃"一发弹都走这里。返回 false 表示弹尽——那一击会被判为免疫。
+## 武器开火前问一句"还有弹吗"，命中前花掉一发。
+## 返回 false 表示弹尽，这一次攻击按普通攻击处理（不扣血、不消耗）。
 ## 这是整个机制的开关：想改成"破甲持续 N 秒"只需改这一个函数，武器侧不用动。
 func _consume_breach() -> bool:
 	if _breach <= 0:
@@ -2078,6 +2144,13 @@ func _choose(index: int) -> void:
 		_open_level_up()
 
 
+## 选卡兑现。分两类：
+##   - **计数/解锁类**（弹数、穿透、刀刃数、回旋镖数、解锁）：直接改整数，本来就有上限
+##   - **数值类**（伤害、射速、射程、移速、生命…）：只累加"原始加成"，再由
+##     _recompute_stats() 统一换算成最终值。上限与递减都在 StatCurve 里。
+##
+## 为什么不再直接乘：乘算是"每张卡都全款"，十几张之后属性会失控；
+## 而直接封顶又让前期几张卡白拿。累加 + 饱和曲线是唯一能同时满足两头的写法。
 func _apply_upgrade(card: Dictionary) -> void:
 	var id: String = str(card["id"])
 	var amount: float = float(card["amount"])
@@ -2085,53 +2158,107 @@ func _apply_upgrade(card: Dictionary) -> void:
 	var orbit: OrbitWeapon = player.orbit_weapon
 	var boomerang: BoomerangWeapon = player.boomerang_weapon
 	match id:
-		"bullet_damage":
-			bullet.damage *= (1.0 + amount)
-		"bullet_rate":
-			bullet.interval = maxf(bullet.interval * (1.0 - amount), 0.1)
 		"bullet_proj":
 			# 高档卡一次 +4，不夹一下会越过 8 的上限
 			bullet.projectiles_per_shot = mini(bullet.projectiles_per_shot + int(round(amount)), 8)
 		"bullet_pierce":
 			bullet.pierce += int(round(amount))
-		"bullet_range":
-			bullet.attack_range += amount
 		"orbit_unlock":
 			orbit.blades = maxi(orbit.blades, 1)
 		"orbit_count":
 			orbit.blades = mini(orbit.blades + int(round(amount)), 8)
-		"orbit_damage":
-			orbit.damage += amount
-		"orbit_radius":
-			orbit.orbit_radius += amount
-		"orbit_speed":
-			orbit.spin_speed *= (1.0 + amount)
 		"boomerang_unlock":
 			boomerang.count = maxi(boomerang.count, 1)
 		"boomerang_count":
 			boomerang.count = mini(boomerang.count + int(round(amount)), 6)
-		"boomerang_damage":
-			boomerang.damage += amount
-		"boomerang_range":
-			boomerang.fly_distance += amount
-		"boomerang_rate":
-			boomerang.cooldown = maxf(boomerang.cooldown * (1.0 - amount), 0.6)
-		"move":
-			player.move_speed *= (1.0 + amount)
-		"hp":
-			# 生命也按百分比：战士 180 与法师 100 吃同样的 +25 差距太大
-			var bonus: float = player.max_health * amount
-			player.max_health += bonus
-			player.heal(bonus)
-		"melee_damage":
-			if player.melee_weapon != null:
-				player.melee_weapon.damage *= (1.0 + amount)
-		"melee_rate":
-			if player.melee_weapon != null:
-				player.melee_weapon.interval = maxf(player.melee_weapon.interval * (1.0 - amount), 0.12)
-		"melee_reach":
-			if player.melee_weapon != null:
-				player.melee_weapon.reach += amount
+		_:
+			_accumulate_stat(id, amount, str(card["unit"]))
+
+
+## 把一张卡的加成折成"原始比例"记进账本。
+## 百分比卡直接加；固定值卡先除以基础值（+18 范围在 60 的基础上就是 +30%），
+## 这样两类卡走同一条曲线，不会出现"固定值卡永远封不了顶"。
+func _accumulate_stat(id: String, amount: float, unit: String) -> void:
+	if not _stat_base.has(id):
+		return
+	var raw: float = 0.0
+	if unit == "pct":
+		raw = amount
+	else:
+		var base: float = float(_stat_base[id])
+		if base <= 0.0:
+			return
+		raw = amount / base
+	_stat_raw[id] = float(_stat_raw.get(id, 0.0)) + raw
+	_recompute_stats()
+
+
+## 记住每项属性的"出厂值"。只在开局建好玩家后抓一次：
+## 中途再抓的话，已经被卡牌抬高过的值会变成新的基准，上限就形同虚设。
+func _capture_stat_bases() -> void:
+	_stat_base.clear()
+	_stat_raw.clear()
+	if not is_instance_valid(player):
+		return
+	var bullet: BulletWeapon = player.bullet_weapon
+	var orbit: OrbitWeapon = player.orbit_weapon
+	var boomerang: BoomerangWeapon = player.boomerang_weapon
+	var melee: MeleeWeapon = player.melee_weapon
+	_stat_base = {
+		"bullet_damage": bullet.damage,
+		"bullet_rate": bullet.interval,
+		"bullet_range": bullet.attack_range,
+		"orbit_damage": orbit.damage,
+		"orbit_speed": orbit.spin_speed,
+		"orbit_radius": orbit.orbit_radius,
+		"boomerang_damage": boomerang.damage,
+		"boomerang_rate": boomerang.cooldown,
+		"boomerang_range": boomerang.fly_distance,
+		"melee_damage": melee.damage if melee != null else 0.0,
+		"melee_rate": melee.interval if melee != null else 0.0,
+		"melee_reach": melee.reach if melee != null else 0.0,
+		"move": player.move_speed,
+		"hp": player.max_health,
+	}
+
+
+func _stat_mult(id: String) -> float:
+	return StatCurve.mult(float(_stat_raw.get(id, 0.0)))
+
+
+## 从"原始加成"重算所有最终值。幂等：同一份账本算多少遍结果都一样，
+## 所以选卡、开新局、自检里直接调都不会出问题。
+func _recompute_stats() -> void:
+	if not is_instance_valid(player) or _stat_base.is_empty():
+		return
+	var bullet: BulletWeapon = player.bullet_weapon
+	var orbit: OrbitWeapon = player.orbit_weapon
+	var boomerang: BoomerangWeapon = player.boomerang_weapon
+	var melee: MeleeWeapon = player.melee_weapon
+	bullet.damage = float(_stat_base["bullet_damage"]) * _stat_mult("bullet_damage")
+	# 射速存的是"间隔"，所以倍率要取倒数；0.08 兜底防手滑叠到除零附近
+	bullet.interval = maxf(float(_stat_base["bullet_rate"]) / _stat_mult("bullet_rate"), 0.08)
+	bullet.attack_range = float(_stat_base["bullet_range"]) * _stat_mult("bullet_range")
+	orbit.damage = float(_stat_base["orbit_damage"]) * _stat_mult("orbit_damage")
+	orbit.spin_speed = float(_stat_base["orbit_speed"]) * _stat_mult("orbit_speed")
+	orbit.orbit_radius = float(_stat_base["orbit_radius"]) * _stat_mult("orbit_radius")
+	boomerang.damage = float(_stat_base["boomerang_damage"]) * _stat_mult("boomerang_damage")
+	boomerang.cooldown = maxf(float(_stat_base["boomerang_rate"]) / _stat_mult("boomerang_rate"), 0.42)
+	boomerang.fly_distance = float(_stat_base["boomerang_range"]) * _stat_mult("boomerang_range")
+	if melee != null:
+		melee.damage = float(_stat_base["melee_damage"]) * _stat_mult("melee_damage")
+		melee.interval = maxf(float(_stat_base["melee_rate"]) / _stat_mult("melee_rate"), 0.12)
+		melee.reach = float(_stat_base["melee_reach"]) * _stat_mult("melee_reach")
+	player.move_speed = float(_stat_base["move"]) * _stat_mult("move")
+	# 生命上限：增长量当场补成血。不补的话"买了上限"反而让血条百分比瞬间变难看，
+	# 玩家会觉得这张卡在坑他。
+	var new_max: float = float(_stat_base["hp"]) * _stat_mult("hp")
+	var gain: float = new_max - player.max_health
+	player.max_health = new_max
+	if gain > 0.0:
+		player.heal(gain)
+	else:
+		player.health = minf(player.health, player.max_health)
 
 
 # ---------------------------------------------------------------- 结束与输入

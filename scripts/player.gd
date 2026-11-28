@@ -103,10 +103,54 @@ var _shake_t: float = 0.0
 var _skill_fx_t: float = 0.0
 ## 迷宫地图由 Game 在开局时注入（组合优于反查 get_parent）。
 ## 为 null 时移动逻辑保持原样，单独跑 Player 场景或旧自检都不会崩。
-var maze: MazeMap = null
+## 赋值时顺手推给武器：子弹与回旋镖在飞行途中拿不到"玩家当前在哪张图"，
+## 只能各自持一份引用。只在这一处推，避免三个武器各写一套赋值逻辑。
+var maze: MazeMap = null:
+	set(value):
+		maze = value
+		_push_maze_to_weapons()
+
+## 穿甲弹倍率。有弹时的一次攻击（一次开火 / 一刀 / 一趟镖）对普通怪 ×2.2；
+## 对 Boss 走 Enemy 的破甲分支（窗口内满额、窗口外强制开窗）。
+## 2.2 这个数必须明显强于任何一张输出卡（最高档 ×4.2 但只加一项属性），
+## 又不能让"有弹"变成唯一打法——弹是捡来的，捡不到就得靠卡。
+const AP_DAMAGE_SCALE: float = 2.2
+
+## 破甲弹：库存真身在 Game，这里只放两个回调，再替武器转发一次。
+## 用属性 setter 而不是在 Game 里手动推给三把武器：赋值只有一处，
+## 少一个武器就少一条漏掉的路径（上一版就是轨道武器不认弹、战士捡了弹没处花）。
+var breach_count: Callable = Callable():
+	set(value):
+		breach_count = value
+		_push_ammo_refs()
+var breach_take: Callable = Callable():
+	set(value):
+		breach_take = value
+		_push_ammo_refs()
 
 var _skill_fx_radius: float = 0.0
 var _skill_fx_color: Color = Color.WHITE
+
+
+## 武器侧需要 maze 的只有三件：子弹、回旋镖、近战。
+## 环绕飞刃是贴着身体转的，墙对它的意义只有"半径够不够"，不存在穿墙。
+func _push_maze_to_weapons() -> void:
+	if bullet_weapon != null:
+		bullet_weapon.maze = maze
+	if boomerang_weapon != null:
+		boomerang_weapon.maze = maze
+	if melee_weapon != null:
+		melee_weapon.maze = maze
+
+
+## 把"还能打几发穿甲弹"的两个回调推给会用弹的武器。
+## 环绕飞刃不在列表里：它每秒命中几十次，按次扣弹会在两秒内清空库存，
+## 而"贴着脸转的刀"本身就不该是消耗破甲弹的地方。
+func _push_ammo_refs() -> void:
+	for w in [bullet_weapon, melee_weapon, boomerang_weapon]:
+		if w != null:
+			w.breach_count = breach_count
+			w.breach_take = breach_take
 
 
 func _ready() -> void:
@@ -141,6 +185,10 @@ func _ready() -> void:
 	add_child(camera_node)
 	camera_node.make_current()
 	camera = camera_node
+	# maze 有可能在 add_child 之前就被 Game 赋过值（那时武器还不存在），
+	# 所以装配完再推一次，两条路径都覆盖。
+	_push_maze_to_weapons()
+	_push_ammo_refs()
 	# 玩家画在所有敌人之上。敌人是后加入 World 的，默认层级会盖住玩家——
 	# 被围住时自己的角色直接看不见，Boss 站到身上更是完全遮住。
 	# z_as_relative 保持默认，所以武器子节点也会跟着抬到同一层。

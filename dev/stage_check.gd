@@ -121,6 +121,15 @@ func _on_boss_spawned() -> void:
 		idx + 1, Stage.title(idx), boss.boss_name, boss.max_health, float(stage["length"]),
 	])
 	_check("Boss 战区块", _game.hud._boss_panel.visible, "Boss 血条没有显示")
+	# 屏顶血条不能压到左右两栏。让位高度是按血条实测高度回写的——
+	# 写死 34 的那版实际要 44，把左上角的血量条压掉了上半截（截图抓到的）。
+	var bar_rect: Rect2 = _game.hud._boss_panel.get_global_rect()
+	var left_top: float = _game.hud._corner_box.get_global_rect().position.y
+	var right_top: float = _game.hud._right_box.get_global_rect().position.y
+	_check("血条不压左栏", left_top >= bar_rect.end.y - 0.5,
+		"血条底 %.1f > 左栏顶 %.1f" % [bar_rect.end.y, left_top])
+	_check("血条不压右栏", right_top >= bar_rect.end.y - 0.5,
+		"血条底 %.1f > 右栏顶 %.1f" % [bar_rect.end.y, right_top])
 	_check("章节条变红", _game.hud._stage_boss, "Boss 期间章节栏应切成关底状态")
 	_game._boss.take_damage(1e9, true)
 	_wait = 3

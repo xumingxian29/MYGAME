@@ -4,8 +4,8 @@ extends SceneTree
 ## 用法：godot --headless --path . --fixed-fps 60 --script res://dev/breach_check.gd
 ##
 ## 覆盖五件事：
-##   1. 壳的判定：普通伤害打不进 Boss、破甲弹固定伤害、锁定期不连扣
-##   2. 破甲窗口：只有窗口里才吃弹，出招/追击期间不扣血也不扣弹
+##   1. 壳的判定：普通伤害永远打不进 Boss；穿甲弹窗口内满额、窗口外半额并强制开窗
+##   2. 破甲窗口：窗口内命中会续窗（有上限），出招/追击期间普通弹打不进
 ##   3. 循环：追击 → 连招（长、定身、无敌） → 破甲窗口 → 追击
 ##   4. 配平表：每章"要几发 / 多久掉一枚"单调变难，单场 Boss 时长落在 25~45 秒
 ##   5. 接线：拾取 +1、HUD 文案、击杀掉弹、Boss 生成时注入 gate
@@ -48,53 +48,47 @@ func _make_boss(hp: float = 9999.0, p_kit: int = 0, p_state: int = Enemy.BOSS_ST
 func _test_shell() -> void:
 	print("\n[壳 · 伤害判定]")
 
-	# 没注入 gate 的 Boss 视为没壳：dev/boss_check.gd 直接 new 出来的就是这种
-	var bare := _make_boss()
-	_check("未注入 gate 时视为没有壳（测试通道不被拦）", bare.breach_gate.is_valid() == false)
-	var hp0: float = bare._health
-	bare.take_damage(100.0)
-	_check("没有壳时普通伤害照常生效", is_equal_approx(bare._health, hp0 - 100.0),
-		"剩 %.1f" % bare._health)
-	bare.free()
-
-	# 弹尽：gate 返回 false → 免疫
+	# 壳不再由"库存 gate"决定，而是由"这一击是不是穿甲弹"决定。
+	# 这样弹在开火时就已经花掉，命中一定有效果——不会出现"打早了白扔"。
 	var boss := _make_boss()
-	boss.breach_gate = func() -> bool: return false
-	var before: float = boss._health
+	var hp0: float = boss._health
 	boss.take_damage(500.0)
-	_check("弹尽时普通伤害被壳挡下", is_equal_approx(boss._health, before),
-		"血从 %.1f 变成 %.1f" % [before, boss._health])
+	_check("普通伤害被壳挡下（Boss 一点血都不掉）",
+		is_equal_approx(boss._health, hp0), "剩 %.1f" % boss._health)
 	_check("挡下时打冷色闪光（而不是白色掉血闪光）", boss._flash_shell)
-	_check("挡下时不计入破甲锁", is_zero_approx(boss._breach_lock_t))
+	# 挡下时会开一个 0.35 秒的**闪光节流**（不再是"破甲锁"，只防轨道武器常亮）
+	_check("挡下时开 0.35s 闪光节流",
+		is_equal_approx(boss._breach_lock_t, 0.35), "%.2f" % boss._breach_lock_t)
 
-	# 有弹：固定伤害，不吃武器倍率
-	var consumed: Array[int] = [0]
-	boss.breach_gate = func() -> bool:
-		consumed[0] += 1
-		return true
-	var hp_before: float = boss._health
-	boss.take_damage(1e6)
-	_check("破甲弹命中 → 伤害等于固定值 %.0f（不是传入的 1e6）" % Enemy.BREACH_HIT_DAMAGE,
-		is_equal_approx(boss._health, hp_before - Enemy.BREACH_HIT_DAMAGE),
-		"掉了 %.1f" % (hp_before - boss._health))
-	_check("破甲弹命中 → 只消耗一发", consumed[0] == 1, "消耗 %d 次" % consumed[0])
-	_check("破甲弹命中 → 进入锁定 %.2fs" % Enemy.BREACH_LOCK_TIME,
-		is_equal_approx(boss._breach_lock_t, Enemy.BREACH_LOCK_TIME))
+	# 窗口内 + 穿甲弹：固定伤害，不吃武器倍率
+	var hp1: float = boss._health
+	boss.take_damage(1e6, false, true)
+	_check("穿甲弹在窗口内 → 伤害等于固定值 %.0f（不是传入的 1e6）"
+			% Enemy.BREACH_HIT_DAMAGE,
+		is_equal_approx(boss._health, hp1 - Enemy.BREACH_HIT_DAMAGE),
+		"掉了 %.1f" % (hp1 - boss._health))
 
-	# 锁定期内：不再扣弹、不再掉血（轨道武器每帧贴身，没有这条会一秒烧掉 60 发）
-	var hp_locked: float = boss._health
-	boss.take_damage(1e6)
-	_check("锁定期内第二次命中：不掉血", is_equal_approx(boss._health, hp_locked),
-		"血从 %.1f 变成 %.1f" % [hp_locked, boss._health])
-	_check("锁定期内第二次命中：不再扣弹", consumed[0] == 1, "消耗 %d 次" % consumed[0])
+	# 窗口内命中会"续窗"：把已进入窗口的时长往回拨
+	boss._boss_state_t = 1.0
+	boss.take_damage(1e6, false, true)
+	_check("窗口内命中续 %.1fs" % Enemy.AP_WINDOW_BONUS,
+		is_equal_approx(boss._boss_state_t, 1.0 - Enemy.AP_WINDOW_BONUS),
+		"%.2f" % boss._boss_state_t)
+	boss._boss_state_t = 0.1
+	boss.take_damage(1e6, false, true)
+	_check("续窗不会把进度打成负数（上限就是窗口长度）",
+		boss._boss_state_t >= 0.0, "%.2f" % boss._boss_state_t)
 
-	# 锁定期走完：恢复正常吃弹
-	boss._tick_flash(Enemy.BREACH_LOCK_TIME + 0.01)
-	var hp_after: float = boss._health
-	boss.take_damage(1e6)
-	_check("锁定结束后重新吃弹", is_equal_approx(boss._health, hp_after - Enemy.BREACH_HIT_DAMAGE),
-		"掉了 %.1f" % (hp_after - boss._health))
-	_check("锁定结束后再扣一发", consumed[0] == 2, "累计 %d 次" % consumed[0])
+	# 窗口外 + 穿甲弹：半额，但立刻把 Boss 打进破甲
+	var outside := _make_boss(9999.0, 0, Enemy.BOSS_STATE_ATTACK)
+	var hp2: float = outside._health
+	outside.take_damage(1e6, false, true)
+	_check("窗口外穿甲弹 → 半额伤害",
+		is_equal_approx(outside._health,
+			hp2 - Enemy.BREACH_HIT_DAMAGE * Enemy.AP_OPEN_DAMAGE_RATIO),
+		"掉了 %.1f" % (hp2 - outside._health))
+	_check("窗口外穿甲弹 → 直接把 Boss 打进破甲", outside.is_vulnerable())
+	outside.free()
 
 	# 普通小兵不受壳影响
 	var grunt := Enemy.new()
@@ -107,7 +101,6 @@ func _test_shell() -> void:
 
 	# 逃生通道
 	var bypass := _make_boss(100.0)
-	bypass.breach_gate = func() -> bool: return false
 	bypass.take_damage(1e9, true)
 	_check("bypass_shell 可以直接打死（自检专用通道）", bypass._dead)
 	boss.free()
@@ -116,18 +109,13 @@ func _test_shell() -> void:
 # ---------------------------------------------------------------- 破甲窗口
 
 func _test_vulnerable() -> void:
-	print("\n[窗口 · 只有破甲时间吃弹]")
+	print("\n[窗口 · 壳只认穿甲弹]")
 	var boss := _make_boss()
-	var consumed: Array[int] = [0]
-	boss.breach_gate = func() -> bool:
-		consumed[0] += 1
-		return true
 
 	boss._boss_state = Enemy.BOSS_STATE_ATTACK
 	var hp0: float = boss._health
 	boss.take_damage(9999.0)
-	_check("出招期间：不掉血", is_equal_approx(boss._health, hp0), "剩 %.1f" % boss._health)
-	_check("出招期间：不扣弹（打早了不该罚资源）", consumed[0] == 0, "扣了 %d 发" % consumed[0])
+	_check("出招期间：普通伤害不掉血", is_equal_approx(boss._health, hp0), "剩 %.1f" % boss._health)
 	_check("出招期间：打冷色闪光", boss._flash_shell)
 	_check("出招期间：is_vulnerable() 为假", not boss.is_vulnerable())
 	_check("出招期间：状态字写「攻击中」", boss.boss_state_text().contains("攻击"))
@@ -137,20 +125,29 @@ func _test_vulnerable() -> void:
 	boss._flash_shell = false
 	var hp1: float = boss._health
 	boss.take_damage(9999.0)
-	_check("追击期间：同样不掉血", is_equal_approx(boss._health, hp1))
-	_check("追击期间：同样不扣弹", consumed[0] == 0, "扣了 %d 发" % consumed[0])
+	_check("追击期间：普通伤害同样不掉血", is_equal_approx(boss._health, hp1))
 
+	# 关键新语义：**即使窗口开着，普通弹也打不进去**。
+	# 上一版是"窗口内随便什么武器都能打，只要库存 gate 通过"，
+	# 结果是破甲弹本身没有存在感——反正打进去的是同一发子弹。
 	boss._boss_state = Enemy.BOSS_STATE_VULNERABLE
 	boss._breach_lock_t = 0.0
-	boss._boss_state_t = 1.2
+	boss._flash_shell = false
 	var hp2: float = boss._health
 	boss.take_damage(9999.0)
-	_check("破甲窗口内：掉固定伤害", is_equal_approx(boss._health, hp2 - Enemy.BREACH_HIT_DAMAGE),
-		"掉了 %.1f" % (hp2 - boss._health))
-	_check("破甲窗口内：才扣弹", consumed[0] == 1, "扣了 %d 发" % consumed[0])
+	_check("窗口内普通弹仍然打不进（壳只认穿甲弹）",
+		is_equal_approx(boss._health, hp2), "掉了 %.1f" % (hp2 - boss._health))
+	_check("窗口内普通弹被挡下也闪光", boss._flash_shell)
 	_check("破甲窗口内：is_vulnerable() 为真", boss.is_vulnerable())
 	_check("状态字带剩余秒数", boss.boss_state_text().begins_with("破甲"),
 		"实际「%s」" % boss.boss_state_text())
+
+	# 穿甲弹：同一状态、同一位置，只有这一击是穿甲，结果必须不同
+	var hp3: float = boss._health
+	boss.take_damage(9999.0, false, true)
+	_check("同一窗口内，穿甲弹能打进去（固定伤害）",
+		is_equal_approx(boss._health, hp3 - Enemy.BREACH_HIT_DAMAGE),
+		"掉了 %.1f" % (hp3 - boss._health))
 
 	# 状态机时序：追击 → 连招 → 窗口 → 追击，且"连招"必须是一段够长的定身期。
 	# 这是用户要的核心手感：出招三秒打不动、窗口几秒才能打。
@@ -329,7 +326,14 @@ func _test_wiring() -> void:
 	var want_hp: float = Enemy.BREACH_HIT_DAMAGE * float(Stage.at(game._stage_index)["breach_shots"])
 	_check("Boss 血量 = 发数 × 单发伤害（%.0f）" % want_hp,
 		is_equal_approx(boss.max_health, want_hp), "实际 %.0f" % boss.max_health)
-	_check("Boss 已注入破甲判定", boss.breach_gate.is_valid())
+	_check("玩家侧已接线破甲弹回调",
+		game.player.breach_count.is_valid() and game.player.breach_take.is_valid())
+	_check("子弹武器拿到了破甲弹回调",
+		game.player.bullet_weapon.breach_count.is_valid()
+		and game.player.bullet_weapon.breach_take.is_valid())
+	_check("近战武器也拿到了（战士没有远程，靠挥砍花弹）",
+		game.player.melee_weapon != null
+		and game.player.melee_weapon.breach_count.is_valid())
 
 	# 刚出场是追击阶段：壳完整，打不进也不扣弹
 	game._breach = 5
@@ -353,14 +357,17 @@ func _test_wiring() -> void:
 	_check("弹尽时 Boss 免疫普通伤害", is_equal_approx(boss._health, hp0),
 		"血从 %.1f 变成 %.1f" % [hp0, boss._health])
 
-	# 补一发再打：扣血且弹药 -1。
-	# 上一次被挡下不进入锁定，但为了不依赖这条实现细节，这里显式清一次锁。
+	# 补一发再打：走真实路径——武器开火时花一发，然后由穿甲弹造成固定伤害
 	game._breach = 3
+	boss._boss_state = Enemy.BOSS_STATE_VULNERABLE
 	boss._breach_lock_t = 0.0
-	var hp1: float = boss._health
-	boss.take_damage(9999.0)
-	_check("有弹时 Boss 掉固定伤害", is_equal_approx(boss._health, hp1 - Enemy.BREACH_HIT_DAMAGE),
-		"掉了 %.1f" % (hp1 - boss._health))
-	_check("打一发消耗一发", game._breach == 2, "实际 %d" % game._breach)
+	var took: bool = game.player.bullet_weapon._take_ap()
+	_check("武器开火时花掉一发破甲弹", took and game._breach == 2,
+		"took=%s 剩 %d" % [str(took), game._breach])
 	_check("Boss 战期间 HUD 同步", game.hud._breach_label.text == "破甲弹 ×2",
 		"实际「%s」" % game.hud._breach_label.text)
+	var hp1: float = boss._health
+	boss.take_damage(9999.0, false, true)
+	_check("穿甲弹命中 Boss 掉固定伤害",
+		is_equal_approx(boss._health, hp1 - Enemy.BREACH_HIT_DAMAGE),
+		"掉了 %.1f" % (hp1 - boss._health))

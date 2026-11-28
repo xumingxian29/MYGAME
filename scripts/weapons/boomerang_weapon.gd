@@ -10,6 +10,12 @@ extends Node2D
 signal thrown()
 
 var enemies: Array[Enemy] = []
+## 迷宫引用。回旋镖是"飞出去再回来"的抛物线，撞墙时不让它原地消失
+## （那样玩家会觉得镖被墙吃了），但墙后的怪不再计入命中。
+var maze: MazeMap = null
+## 破甲弹回调，由 Player 注入。一次投掷花一发，整趟飞行都算穿甲。
+var breach_count: Callable = Callable()
+var breach_take: Callable = Callable()
 
 @export var count: int = 0
 @export var damage: float = 14.0
@@ -60,16 +66,25 @@ func _duration() -> float:
 	return maxf(2.0 * fly_distance / maxf(fly_speed, 1.0), 0.15)
 
 
+func _take_ap() -> bool:
+	if not breach_count.is_valid() or not breach_take.is_valid():
+		return false
+	if int(breach_count.call()) <= 0:
+		return false
+	return bool(breach_take.call())
+
+
 func _throw() -> void:
 	thrown.emit()
 	_cd = cooldown
+	var ap: bool = _take_ap()
 	var base: float = _aim_angle()
 	var n: int = maxi(count, 1)
 	var dirs: Array[float] = []
 	for i in range(n):
 		# 均匀铺满一圈：1 枚朝最近敌人，2 枚对向，3 枚 120° 分布
 		dirs.append(base + TAU * float(i) / float(n))
-	_flights.append({"dirs": dirs, "t": 0.0, "pt": 0.0})
+	_flights.append({"dirs": dirs, "t": 0.0, "pt": 0.0, "ap": ap})
 	while _flights.size() > MAX_FLIGHTS:
 		_flights.remove_at(0)
 
@@ -105,15 +120,19 @@ func _update_flights(delta: float) -> void:
 			reach = 2.0 - reach
 		var radius: float = fly_distance * reach
 		for dir in flight["dirs"]:
-			_resolve_hit(Vector2(cos(dir), sin(dir)) * radius)
+			_resolve_hit(Vector2(cos(dir), sin(dir)) * radius, bool(flight.get("ap", false)))
 
 		if progress >= 1.0:
 			_flights.remove_at(index)
 		index -= 1
 
 
-func _resolve_hit(local_pos: Vector2) -> void:
+func _resolve_hit(local_pos: Vector2, ap: bool = false) -> void:
 	var world_pos: Vector2 = global_position + local_pos
+	# 只判端点不够：镖的飞行是参数化的，端点可能正好落在墙后的可走格里，
+	# 于是"隔着一堵墙把墙后的怪削掉"。必须沿连线采样，和近战用同一套口径。
+	if not _has_line_to(world_pos):
+		return
 	for enemy in enemies:
 		if not is_instance_valid(enemy) or enemy.is_queued_for_deletion():
 			continue
@@ -123,8 +142,20 @@ func _resolve_hit(local_pos: Vector2) -> void:
 		var reach: float = enemy.radius + HIT_RADIUS
 		if world_pos.distance_squared_to(enemy.global_position) > reach * reach:
 			continue
-		enemy.take_damage(damage)
+		enemy.take_damage(damage * (Player.AP_DAMAGE_SCALE if ap else 1.0), false, ap)
 		_hit_cd[key] = HIT_COOLDOWN
+
+
+## 从玩家到落点，墙有没有挡住。8 段是"镖最远 400 像素 / 一格 96"的下限：
+## 再少就可能整格跳过去（两端都在可走格、中间的墙被跳过）。
+func _has_line_to(to_world: Vector2) -> bool:
+	if maze == null:
+		return true
+	for i in range(1, 8):
+		var t: float = float(i) / 8.0
+		if not maze.has_floor_at(global_position.lerp(to_world, t)):
+			return false
+	return true
 
 
 func _tick_cooldowns(delta: float) -> void:

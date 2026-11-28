@@ -4,7 +4,7 @@ extends SceneTree
 ## 用法：godot --headless --path . --fixed-fps 60 --script res://dev/cap_check.gd
 ##
 ## 测三件事：
-##   1. 视野内挤进 40 只，0.5 秒内被压到 20 以内，且一只都没被删除
+##   1. 视野内挤进 70 只，0.5 秒内被压到 40 以内，且一只都没被删除
 ##   2. Boss 在场时上限收到 10，召唤也受同一道闸门约束（不会先召再被推走）
 ##   3. 被推走的怪仍然站在可走格上（不嵌墙），且没有被算成击杀
 ##
@@ -40,23 +40,24 @@ func _run() -> void:
 
 	print("\n[下限口径]")
 	_check("视口半宽为正", game._view_half().x > 1.0, "%.1f" % game._view_half().x)
-	_check("无 Boss 时上限 20", game._visible_cap() == 20, "%d" % game._visible_cap())
+	_check("无 Boss 时上限 40", game._visible_cap() == 40, "%d" % game._visible_cap())
 
-	print("\n[视野内 40 只 → 压到 20]")
+	print("\n[视野内 70 只 → 压到 40]")
 	game._elapsed = 0.0
 	# 贴着脸造：半径 120~300 的那一圈全在视野内（半宽约 474）
-	for i in range(40):
-		var a: float = TAU * float(i) / 40.0
+	# 70 只挤在视野里：上限 40 之后，测试用例本身要把"超编"造得更狠才能触发驱逐
+	for i in range(70):
+		var a: float = TAU * float(i) / 70.0
 		game._create_enemy(Enemy.Kind.GRUNT, false,
 			game.player.global_position + Vector2(cos(a), sin(a)) * randf_range(120.0, 300.0))
 	var made: int = game._enemies.size()
-	_check("造出 40 只", made >= 30, "实际 %d" % made)
+	_check("造出 70 只", made >= 60, "实际 %d" % made)
 
 	# 0.25 秒节流 + 一帧执行，推进 0.5 秒足够触发两轮
 	for i in range(30):
 		await physics_frame
 	var now: int = game._visible_enemy_count()
-	_check("视野内已压到 20 以内", now <= 20, "实际 %d" % now)
+	_check("视野内已压到 40 以内", now <= 40, "实际 %d" % now)
 	_check("被推走的怪没有被删除", game._enemies.size() >= made - 12,
 		"%d → %d" % [made, game._enemies.size()])
 
@@ -90,12 +91,12 @@ func _run() -> void:
 	print("\n[刷怪门控]")
 	game._boss = null
 	# 直接铺满视野，再调一波刷怪：视野内已满，这一波必须一只都不产
-	for i in range(24):
-		var a: float = TAU * float(i) / 24.0
+	for i in range(48):
+		var a: float = TAU * float(i) / 48.0
 		game._create_enemy(Enemy.Kind.GRUNT, false,
 			game.player.global_position + Vector2(cos(a), sin(a)) * 200.0)
 	var count_before: int = game._enemies.size()
-	_check("刷怪前视野已满", game._visible_enemy_count() >= 20,
+	_check("刷怪前视野已满", game._visible_enemy_count() >= 40,
 		"%d" % game._visible_enemy_count())
 	game._spawn_wave()
 	_check("视野满时不刷怪", game._enemies.size() == count_before,

@@ -65,6 +65,10 @@ var _best_label: Label
 var _panel: PanelContainer
 var _panel_box: VBoxContainer
 var _dim: ColorRect
+## 左右两栏。存成成员是为了后面按血条实测高度二次定位——
+## 血条高度是字体行高算出来的，写死一个数和实际值差 10 像素就是"压住血条"。
+var _corner_box: VBoxContainer
+var _right_box: VBoxContainer
 ## 屏顶 Boss 血条：名字 + 阶段 + 一条长血。只在 Boss 战期间显示。
 var _boss_panel: PanelContainer
 var _boss_bar: ProgressBar
@@ -154,9 +158,12 @@ func _build() -> void:
 
 	var corner := VBoxContainer.new()
 	corner.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	corner.position = Vector2(20, 16)
+	# 顶部永久留出 TOP_RESERVE 给 Boss 血条：不开战时空着也一样，
+	# 换来的是"开 Boss 时 HUD 不跳"。真实值在 _build_boss_bar() 末尾按实测高度回写。
+	corner.position = Vector2(20, TOP_RESERVE)
 	corner.add_theme_constant_override("separation", 6)
 	_root.add_child(corner)
+	_corner_box = corner
 
 	# 三条状态条：血 / 经验 / 蓝。每条都是"进度条 + 居中数值"，
 	# 数值叠在条上而不是另起一行，省纵向空间，也不会让眼睛在两处之间来回跑。
@@ -206,9 +213,10 @@ func _build() -> void:
 	right.set_anchors_preset(Control.PRESET_TOP_RIGHT)
 	right.offset_left = -360.0
 	right.offset_right = -20.0
-	right.offset_top = 14.0
+	right.offset_top = TOP_RESERVE
 	right.add_theme_constant_override("separation", 2)
 	_root.add_child(right)
+	_right_box = right
 
 	_name_label = _make_label("", 14, Color(0.62, 0.72, 0.86))
 	_score_label = _make_label("分数 0", 26, Color(1.0, 0.93, 0.7))
@@ -283,62 +291,75 @@ func _build_pause_panel(center: CenterContainer) -> void:
 	box.add_child(_pause_menu_btn)
 
 
-## 屏顶 Boss 血条。不抢左右两栏的位置：桌面上居中贴顶，触屏上整体下移到状态条
-## 下方（960 基准下左右两栏已经吃到 280 / 600，中间只剩 320 宽，塞不下 460 的条）。
+## 屏顶 Boss 血条：**真正贴在最上面**，占满整屏宽度。
+##
+## 原来是居中 460 宽、触屏还要下移到 104——那是"避开左右两栏"的折中，
+## 代价是它看起来像一块浮在画面中间的面板，而不是"这一场战斗的标题栏"。
+## 现在改成一行：名字 + 血条 + 阶段 / 状态字，横着排满顶部；
+## 左右两栏整体下移 TOP_RESERVE 给它让位，**并且永久让位**——
+## 只在开 Boss 时才让位的话，一开战整块 HUD 会跳一下。
+const TOP_RESERVE: float = 34.0
+## 实际生效的让位高度：_sync_top_reserve() 按血条实测高度回写。
+## 常量只作为"量不出来时"的兜底，不参与真实布局。
+var _top_reserve: float = TOP_RESERVE
+
+
 func _build_boss_bar() -> void:
 	_boss_panel = PanelContainer.new()
 	_boss_panel.name = "BossBar"
-	_boss_panel.anchor_left = 0.5
-	_boss_panel.anchor_right = 0.5
+	# 左右各留 2%：贴边太死，手机圆角/刘海会把两头切掉
+	_boss_panel.anchor_left = 0.02
+	_boss_panel.anchor_right = 0.98
 	_boss_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_boss_panel.visible = false
-	_boss_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.95, 0.36, 0.4, 0.9)))
+	_boss_panel.add_theme_stylebox_override("panel", _tight_panel_style(Color(0.95, 0.36, 0.4, 0.9)))
 	_root.add_child(_boss_panel)
 
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 4)
-	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_boss_panel.add_child(box)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_boss_panel.add_child(row)
 
-	var head := HBoxContainer.new()
-	head.add_theme_constant_override("separation", 10)
-	head.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	box.add_child(head)
+	_boss_name_label = _make_label("", 16, Color(1.0, 0.87, 0.87))
+	_boss_name_label.custom_minimum_size = Vector2(150, 0)
+	_boss_name_label.clip_text = true
+	_boss_name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	row.add_child(_boss_name_label)
 
-	_boss_name_label = _make_label("", 17, Color(1.0, 0.87, 0.87))
-	_boss_name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	head.add_child(_boss_name_label)
+	_boss_bar = _make_bar(Color(0.92, 0.27, 0.32), Vector2(420, 16))
+	_boss_bar.max_value = 1.0
+	_boss_bar.value = 1.0
+	_boss_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_boss_bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_boss_bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(_boss_bar)
 
 	_boss_phase_label = _make_label("", 13, Color(0.96, 0.74, 0.74))
 	_boss_phase_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	head.add_child(_boss_phase_label)
+	_boss_phase_label.custom_minimum_size = Vector2(64, 0)
+	row.add_child(_boss_phase_label)
 
 	# 状态字（攻击中 / 破甲 2.4s）放最右。给了最小宽度：
 	# 倒计时每 0.1 秒变一次字，不给宽度的话整条血条会跟着左右抖。
 	_boss_state_label = _make_label("", 13, Color(0.72, 0.80, 0.94))
 	_boss_state_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	_boss_state_label.custom_minimum_size = Vector2(100, 0)
-	head.add_child(_boss_state_label)
-
-	_boss_bar = _make_bar(Color(0.92, 0.27, 0.32), Vector2(420, 15))
-	_boss_bar.max_value = 1.0
-	_boss_bar.value = 1.0
-	_boss_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	box.add_child(_boss_bar)
+	_boss_state_label.custom_minimum_size = Vector2(96, 0)
+	row.add_child(_boss_state_label)
 	_layout_boss_bar()
 
 
-## 触屏的基准分辨率小一圈，但左右两栏的像素宽度不变，所以条要缩窄并下移，
-## 否则会盖到左上角的血条和右上角的分数。
+## 两种模式同一套位置：贴顶 4 像素。宽度交给锚点，不再按模式改数值——
+## 「桌面上贴顶、手机上挪开」这种按模式分叉的布局，每次改 HUD 都要验两遍。
 func _layout_boss_bar() -> void:
 	if _boss_panel == null:
 		return
-	var width: float = 340.0 if _touch_mode else 460.0
-	_boss_panel.offset_left = -width * 0.5
-	_boss_panel.offset_right = width * 0.5
-	_boss_panel.offset_top = 104.0 if _touch_mode else 12.0
+	_boss_panel.offset_left = 0.0
+	_boss_panel.offset_right = 0.0
+	_boss_panel.offset_top = 4.0
+	_boss_panel.offset_bottom = 0.0
 	if _boss_bar != null:
-		_boss_bar.custom_minimum_size = Vector2(width - 24.0, 15.0)
+		_boss_bar.custom_minimum_size = Vector2(0.0, 16.0)
+	_sync_top_reserve()
 
 
 ## 章节横幅。整块 Control 铺满屏幕但 IGNORE 鼠标，文字用描边而不是底色块：
@@ -1083,6 +1104,38 @@ func _divider() -> ColorRect:
 
 func _panel_style(border: Color) -> StyleBoxFlat:
 	return UiKit.panel_style(border)
+
+
+## 屏顶血条专用窄边距面板。`UiKit.panel_style` 的 28px 内容边距是给弹窗写的，
+## 套在一行 22px 高的标签上会把它撑成 78px 高的云，直接压掉左上角的血量条
+## （这是渲染截图里抓到的，不是估计）。
+func _tight_panel_style(border: Color) -> StyleBoxFlat:
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.07, 0.09, 0.13, 0.95)
+	style.set_corner_radius_all(8)
+	style.content_margin_left = 14.0
+	style.content_margin_right = 14.0
+	style.content_margin_top = 5.0
+	style.content_margin_bottom = 5.0
+	style.border_color = border
+	style.set_border_width_all(2)
+	return style
+
+
+## 左右两栏给血条让位，让多少按**实测**最小高度算。
+## 写死常量的版本在「16px 名字 + 13px 状态字」混排时低了十来像素，
+## 结果血条盖住左上角血条的上半截——截图上一眼能看出来，但自检里看不出来。
+func _sync_top_reserve() -> void:
+	if _boss_panel == null:
+		return
+	var bar_h: float = _boss_panel.get_combined_minimum_size().y
+	if bar_h <= 0.0:
+		return
+	_top_reserve = _boss_panel.offset_top + bar_h + 6.0
+	if _corner_box != null:
+		_corner_box.position = Vector2(20.0, _top_reserve)
+	if _right_box != null:
+		_right_box.offset_top = _top_reserve
 
 
 # ---------------------------------------------------------------- 卡片

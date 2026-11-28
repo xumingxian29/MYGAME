@@ -39,35 +39,51 @@ func _run() -> void:
 	game._on_menu_started("探针", HeroClass.WARRIOR)
 	await process_frame
 
+	print("\n[门 → 难度增量]")
+	# 四扇门各自带增量，不再是"每层固定 +10%"
+	_check("单卡门 +20%", is_equal_approx(Portal.DIFFICULTY[Portal.Reward.CARD], 0.20),
+		"%f" % Portal.DIFFICULTY[Portal.Reward.CARD])
+	_check("破甲弹门 +40%", is_equal_approx(Portal.DIFFICULTY[Portal.Reward.BREACH], 0.40),
+		"%f" % Portal.DIFFICULTY[Portal.Reward.BREACH])
+	_check("金币门 +60%", is_equal_approx(Portal.DIFFICULTY[Portal.Reward.GOLD], 0.60),
+		"%f" % Portal.DIFFICULTY[Portal.Reward.GOLD])
+	_check("双卡门 +100%（最大）", is_equal_approx(Portal.DIFFICULTY[Portal.Reward.CARD2], 1.00),
+		"%f" % Portal.DIFFICULTY[Portal.Reward.CARD2])
+
 	print("\n[难度乘数]")
 	game._floor = 0
+	game._floor_power = 0.0
 	_check("第 1 图 = 1.00", is_equal_approx(game._power_scale(), 1.0),
 		"%f" % game._power_scale())
-	game._floor = 1
-	_check("过 1 道门 = 1.10", is_equal_approx(game._power_scale(), 1.1),
+	game._floor_power = 0.2
+	_check("走一扇单卡门 = 1.20", is_equal_approx(game._power_scale(), 1.2),
 		"%f" % game._power_scale())
-	game._floor = 3
-	_check("过 3 道门 = 1.331（累乘）", absf(game._power_scale() - 1.331) < 0.001,
-		"%f" % game._power_scale())
+	# 加法累加：两次 +20% 和一次 +40% 一样难。连乘的话后者会明显更狠，
+	# 走三次双卡门直接 ×8，那不是选择，是判死刑。
+	game._floor_power = 0.4
+	_check("两次 +20% 等于一次 +40%（加法累加）",
+		is_equal_approx(game._power_scale(), 1.4), "%f" % game._power_scale())
+	game._floor_power = 3.0
+	_check("累加没有上限，但速度仍封顶 1.5×",
+		absf(minf(game._power_scale(), 1.5) - 1.5) < 0.0001,
+		"power=%f" % game._power_scale())
 
-	# 同一时刻、同一章造两只同类怪，唯一变量是 _floor
+	# 同一时刻、同一章造两只同类怪，唯一变量是难度系数
 	game._floor = 0
+	game._floor_power = 0.0
 	game._create_enemy(Enemy.Kind.GRUNT, false, game.player.global_position + Vector2(600.0, 0.0))
 	var base_enemy: Enemy = game._enemies[game._enemies.size() - 1]
 	var base_hp: float = base_enemy.max_health
 	game._floor = 1
+	game._floor_power = 0.2
 	game._create_enemy(Enemy.Kind.GRUNT, false, game.player.global_position + Vector2(620.0, 0.0))
 	var hard_enemy: Enemy = game._enemies[game._enemies.size() - 1]
-	_check("血量吃到 +10%", absf(hard_enemy.max_health - base_hp * 1.1) < 0.01,
+	_check("血量吃到 +20%", absf(hard_enemy.max_health - base_hp * 1.2) < 0.01,
 		"%.1f → %.1f" % [base_hp, hard_enemy.max_health])
-	_check("伤害倍率注入到敌人", is_equal_approx(hard_enemy.power_scale, 1.1),
+	_check("伤害倍率注入到敌人", is_equal_approx(hard_enemy.power_scale, 1.2),
 		"%f" % hard_enemy.power_scale)
 	_check("第 1 图的怪不带倍率", is_equal_approx(base_enemy.power_scale, 1.0),
 		"%f" % base_enemy.power_scale)
-	# 速度封顶：第 8 层理论 2.14，实际只给 1.5
-	game._floor = 8
-	_check("速度封顶 1.5×", absf(minf(game._power_scale(), 1.5) - 1.5) < 0.0001,
-		"power=%f" % game._power_scale())
 
 	# 清掉两只探针怪，别让它们干扰后面的数量断言
 	for e in game._enemies:
@@ -75,6 +91,7 @@ func _run() -> void:
 			e.queue_free()
 	game._enemies.clear()
 	game._floor = 0
+	game._floor_power = 0.0
 	await process_frame
 
 	print("\n[Boss 死 → 四扇门]")
@@ -213,6 +230,8 @@ func _run() -> void:
 	_check("确认后回到 PLAYING", game._state == game.State.PLAYING, "state=%d" % game._state)
 	_check("门已回收", game._portals.is_empty())
 	_check("难度上升一层", game._floor == 1, "实际 %d" % game._floor)
+	_check("累计难度 = 这扇门的增量（单卡 +20%）",
+		is_equal_approx(game._floor_power, 0.2), "%f" % game._floor_power)
 	_check("地图序号 +1", game._map_index == 1, "实际 %d" % game._map_index)
 	_check("章节推进一章", game._stage_index == 1, "实际 %d" % game._stage_index)
 	_check("换了一张新图", game.maze.get_instance_id() != old_maze_id)
@@ -269,5 +288,6 @@ func _run() -> void:
 	print("\n[新图的怪吃新倍率]")
 	game._create_enemy(Enemy.Kind.GRUNT, false, game.player.global_position + Vector2(500.0, 0.0))
 	var fresh: Enemy = game._enemies[game._enemies.size() - 1]
-	_check("第 2 图的怪带 1.1×", is_equal_approx(fresh.power_scale, 1.1),
+	# 走的这扇门是单卡（+20%），所以新图的怪带 1.2×，不再是固定的 1.1×
+	_check("第 2 图的怪带 1.2×（这扇门 +20%）", is_equal_approx(fresh.power_scale, 1.2),
 		"%f" % fresh.power_scale)

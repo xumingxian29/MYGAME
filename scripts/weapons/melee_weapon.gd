@@ -11,6 +11,13 @@ signal swung()
 
 ## 由 Player 注入的敌人列表引用
 var enemies: Array[Enemy] = []
+## 迷宫引用。近战是扇形挥砍，判定只在角度和半径上——不加视线检查的话，
+## 隔着一堵墙也能把墙后的怪砍死，而玩家看不到那一刀打到了什么。
+var maze: MazeMap = null
+## 破甲弹回调，由 Player 注入（同 BulletWeapon）。战士没有远程武器，
+## 破甲弹完全靠挥砍花出去——没有这两行，战士捡到的弹一件都用不掉。
+var breach_count: Callable = Callable()
+var breach_take: Callable = Callable()
 
 @export var enabled: bool = true
 @export var damage: float = 26.0
@@ -65,6 +72,15 @@ func _nearest_enemy() -> Enemy:
 	return best
 
 
+## 整刀最多花一发弹：扇形一刀能砍到五六只，按命中数扣弹会在两秒内清空库存。
+func _take_ap() -> bool:
+	if not breach_count.is_valid() or not breach_take.is_valid():
+		return false
+	if int(breach_count.call()) <= 0:
+		return false
+	return bool(breach_take.call())
+
+
 func _swing_at(target_pos: Vector2) -> void:
 	var to_target: Vector2 = target_pos - global_position
 	_swing_angle = to_target.angle() if to_target.length() > 0.001 else 0.0
@@ -73,6 +89,8 @@ func _swing_at(target_pos: Vector2) -> void:
 	_prev_swing_t = SWING_TIME
 	swung.emit()
 
+	var ap: bool = _take_ap()
+	var hit_damage: float = damage * (Player.AP_DAMAGE_SCALE if ap else 1.0)
 	var half: float = arc * 0.5
 	for enemy in enemies:
 		if not is_instance_valid(enemy) or enemy.is_queued_for_deletion():
@@ -84,8 +102,25 @@ func _swing_at(target_pos: Vector2) -> void:
 			continue
 		if dist > 0.001 and absf(angle_difference(_swing_angle, off.angle())) > half:
 			continue
-		enemy.take_damage(damage)
+		# 视线检查放在最后：它是这里唯一做 4 次格查询的判定，
+		# 前面几条距离/角度都是纯算术，先筛掉大部分才不会让挥砍变贵。
+		if not _has_line_of_sight(enemy.global_position):
+			continue
+		enemy.take_damage(hit_damage, false, ap)
 	queue_redraw()
+
+
+## 刀光能不能"看到"目标。沿连线取 4 个点查可走格——
+## 不取 8 个是因为一格 96 像素、刀长最多 180，4 个点已经保证不会跨过整格；
+## 取多了只是重复查同一个格子。
+func _has_line_of_sight(to_world: Vector2) -> bool:
+	if maze == null:
+		return true
+	for i in range(1, 5):
+		var t: float = float(i) / 5.0
+		if not maze.has_floor_at(global_position.lerp(to_world, t)):
+			return false
+	return true
 
 
 func _draw() -> void:
