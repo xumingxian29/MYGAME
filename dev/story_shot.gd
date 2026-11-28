@@ -1,8 +1,8 @@
 extends SceneTree
 
-## 剧情屏截图：开场（逐字进行中）与全显示两种状态各一张，
-## 再加一张胜利结算。用来确认"跳过键在右上角"和排版没有溢出。
+## 剧情屏 / 选门确认面板 / 结局结算的截图。
 ## 用法：godot --path . --script res://dev/story_shot.gd   （不能 headless，headless 没有渲染设备）
+##      加 `-- --touch` 走触屏排版，配 `--resolution 844x390` 看手机横屏的实际效果。
 ## 输出 .workbuddy/story_*.png
 ##
 ## 不做断言——断言在 dev/story_check.gd。这里只负责"看一眼"。
@@ -52,22 +52,54 @@ func _process(_delta: float) -> bool:
 			_step = 2
 			_frames = 0
 		2:
-			# 进游戏，直接摆一场"胜利结算"
+			# 中途的选门确认面板：底下那行"走过的路"是这一版的决策可视化的全部
 			if _frames < 6:
 				return false
-			_game._map_index = 9
-			_game._gauntlet_total = 5
-			_game._boss_kills = 5
-			_game._elapsed = 823.0
-			_game._kills = 612
-			_game._level = 34
-			_game._on_victory()
+			_game._map_index = 4
+			_game._gate_trail = {"card": 2, "card2": 3, "breach": 1, "gold": 1}
+			_game._last_choice = "card2"
+			_game._open_portals(_game.player.global_position)
 			_step = 3
 			_frames = 0
 		3:
+			# 面板是在这一帧建出来的，但截图抓的是上一帧的画面：
+			# 同一个 _process 里建完就拍，拍到的是还没有面板的那一帧。
+			if _frames < 3:
+				return false
+			_game._on_portal_requested(_game._portals[1])
+			_step = 4
+			_frames = 0
+		4:
+			if _frames < 4:
+				return false
+			_snap("story_3_confirm")
+			_step = 5
+			_frames = 0
+		5:
+			# 结局：这一局一路双卡，门外是"新的王"
+			if _frames < 4:
+				return false
+			_game._cancel_portal()
+			for p in _game._portals:
+				if is_instance_valid(p):
+					p.queue_free()
+			_game._portals.clear()
+			_game._awaiting_portal = false
+			_game._map_index = 9
+			_game._gauntlet_total = 5
+			_game._boss_kills = 5
+			_game._elapsed = 1812.0
+			_game._kills = 1348
+			_game._level = 41
+			_game._gate_trail = {"card2": 7, "card": 2, "breach": 1}
+			_game._last_choice = "card2"
+			_game._on_victory()
+			_step = 6
+			_frames = 0
+		6:
 			if _frames < 6:
 				return false
-			_snap("story_3_victory")
+			_snap("story_4_victory")
 			_finish()
 			return true
 	return false

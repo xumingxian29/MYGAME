@@ -368,6 +368,18 @@ var _pending_portal: Portal = null
 ## 而不是"再换一张图"。之所以单独计数而不是用 _map_index：
 ## 王座厅也是一张图，但它不是"又过了一道门"。
 var _portal_count: int = 0
+## 十次选门的记账：{"card": n, "card2": n, "breach": n, "gold": n}。
+## 键用短名而不是 Portal.Reward 的枚举值——这份账要交给 Story 判结局，
+## 而 Story 是纯数据表，不该认识玩法层的枚举。
+## 名字叫 trail 不叫 choices：_choices 已经是升级三选一的卡片列表，
+## 两个都叫 _choices 会在赋值时互相覆盖，而且不会有任何报错。
+## 最后一个选择单独记：票数并列时用"最后选的那个"破平，而不是按固定优先级——
+## 玩家会觉得"我最后想要的是这个"，而不是"表里这个排在前面"。
+var _gate_trail: Dictionary = {}
+var _last_choice: String = ""
+## 这一局走到哪个结局（由 _choices 在开门那刻算定）。金门下面的字、结算标题、
+## 存档都用它。空串表示还没算（还没走完十道门）。
+var _ending: String = ""
 ## 王座厅：还剩几位守门人 / 一共几位 / 下一位的下标 / 出场倒计时。
 var _gauntlet_left: int = 0
 var _gauntlet_total: int = 0
@@ -758,6 +770,9 @@ func _begin_run() -> void:
 	_floor = 0
 	_floor_power = 0.0
 	_portal_count = 0
+	_gate_trail.clear()
+	_last_choice = ""
+	_ending = ""
 	_gauntlet_left = 0
 	_gauntlet_total = 0
 	_gauntlet_index = 0
@@ -1487,6 +1502,10 @@ func _on_boss_killed(at: Vector2) -> void:
 func _open_final_portal(at: Vector2) -> void:
 	_awaiting_portal = true
 	_spawn_timer = 0.0
+	# 十次选择到这里已经全部记完，结局现在就定下来——
+	# 不是"踩上门那一刻才抽"，否则门下面的字说不出来，玩家也就看不到
+	# "我这一路的选择指向哪个门外"。
+	_ending = Story.resolve_ending(_gate_trail, _last_choice)
 	var center: Vector2 = at
 	if maze != null:
 		center = maze.nearest_floor_point(at)
@@ -1494,6 +1513,8 @@ func _open_final_portal(at: Vector2) -> void:
 	portal.index = 0
 	portal.reward = Portal.Reward.VICTORY
 	portal.target = player
+	# 门下面写的是"你将走向哪一个门外"，不是固定的"黎明"。
+	portal.subtitle = Story.ending_gate(_ending)
 	portal.request_enter.connect(_on_portal_requested)
 	world.add_child(portal)
 	portal.global_position = center
@@ -1501,7 +1522,8 @@ func _open_final_portal(at: Vector2) -> void:
 	_portals.append(portal)
 	if audio != null:
 		audio.play("clear")
-	hud.show_banner("西城门开了", "走出去，这一局就结束了", Color(1.0, 0.94, 0.72), true)
+	hud.show_banner("西城门开了", "门外是「%s」——十道门是怎么走的，这里就长什么样"
+		% Story.ending_name(_ending), Story.ending_tint(_ending), true)
 	_update_hud()
 
 
@@ -1523,6 +1545,10 @@ func _on_victory() -> void:
 
 	var breakdown: Dictionary = Score.compute(_kills, _elite_kills, _elapsed,
 		_level, _xp_total, true, true)
+	# 结局兜底：正常路径上 _open_final_portal 已经算过了（玩家是从金门走进来的），
+	# 但自检会直接调 _on_victory()，那时账本可能是空的——空账本按"黎明"结。
+	if _ending.is_empty():
+		_ending = Story.resolve_ending(_gate_trail, _last_choice)
 	var outcome: Dictionary = ScoreBoard.submit(str(_profile.get("name", ScoreBoard.DEFAULT_NAME)), {
 		"score": int(breakdown["total"]),
 		"kills": _kills,
@@ -1533,6 +1559,7 @@ func _on_victory() -> void:
 		"stage": _map_index,
 		"cleared": true,
 		"victory": true,
+		"ending": _ending,
 	})
 	_profile = outcome["profile"]
 	hud.set_score(str(_profile["name"]), int(breakdown["total"]), int(_profile["best"]["score"]))
@@ -1550,6 +1577,7 @@ func _on_victory() -> void:
 	result["victory_points"] = int(breakdown.get("victory_points", 0))
 	result["acts"] = Story.ACT_COUNT
 	result["bosses"] = _gauntlet_total
+	result["ending"] = _ending
 	hud.show_victory(result)
 
 
@@ -1645,8 +1673,13 @@ func _on_portal_requested(portal: Portal) -> void:
 	# 玩家真正要判断的是"下一幕有多难"，"+40%" 单独看没有参照。
 	var final: bool = portal.reward == Portal.Reward.VICTORY
 	var next_power: float = 1.0 + _floor_power + portal.difficulty()
+	# 确认面板要把"这一路是怎么走的"摊开：十个选择决定门外是什么，
+	# 但玩家在第 9 道门前已经记不清自己前 8 次选了什么。不给他看账本，
+	# "选择指向结局"这件事在游玩过程中就是隐形的，只在结算时才揭晓一次。
+	var trail: String = Story.trail_text(_gate_trail, _choice_key(portal.reward))
 	hud.open_portal_confirm(portal.reward_text(), _act_text(_map_index),
-		_act_text(_map_index + 1), int(round((next_power - 1.0) * 100.0)), final)
+		_act_text(_map_index + 1), int(round((next_power - 1.0) * 100.0)), final,
+		trail, Story.ending_name(_ending) if final else "")
 	_sync_pause()
 
 
@@ -1671,6 +1704,7 @@ func _confirm_portal() -> void:
 		_on_victory()
 		return
 	_grant_portal_reward(reward)
+	_record_choice(reward)
 	_floor_power += portal.difficulty()
 	_floor += 1
 	_map_index += 1
@@ -1840,6 +1874,30 @@ func _grant_portal_reward(reward: int) -> void:
 			_pending_cards += 2
 		_:
 			_pending_cards += 1
+
+
+## 记一笔"这一道门是怎么选的"。只记账，不发奖励——奖励和账目分开，
+## 是因为并不是所有门都给东西（金门什么都不发），但它们都不是"选择"。
+func _record_choice(reward: int) -> void:
+	var key: String = _choice_key(reward)
+	if key.is_empty():
+		return
+	_gate_trail[key] = int(_gate_trail.get(key, 0)) + 1
+	_last_choice = key
+
+
+## Portal.Reward → Story 记账用的短名。金门返回空串：它不是四个选择之一。
+func _choice_key(reward: int) -> String:
+	match reward:
+		Portal.Reward.CARD:
+			return "card"
+		Portal.Reward.CARD2:
+			return "card2"
+		Portal.Reward.BREACH:
+			return "breach"
+		Portal.Reward.GOLD:
+			return "gold"
+	return ""
 
 
 ## 换图：清场 + 重铺迷宫 + 把玩家放到新起点。

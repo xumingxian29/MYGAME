@@ -162,13 +162,102 @@ const BOSS_LINES: Dictionary = {
 	"无光之王": "城堡醒了。它一直就是这座城堡",
 }
 
-## 胜利结算的三行收尾。写在结算面板里而不是再开一屏剧情：
-## 玩家刚打完五个 Boss，最想看的是分数，不是又一段独白。
-const EPILOGUE: Array[String] = [
-	"城门在你身后合上，声音像一声叹气。",
-	"晨光很疼。你才发现自己已经忘了太阳的样子。",
-	"你逃出来了。城堡没有塌——它只是换了一个囚徒。",
-]
+## 从王座厅走向城门的这一刻，门外是什么，由**这一局怎么选门**决定。
+## 五个结局不是"随机抽一个"：十次选门里哪一类占多数，就走向哪一种门外。
+##
+## 为什么把结局挂在"选门"上而不是"最后一个对话选项"：
+## 门是这局唯一重复十次、且每次都真的有代价的决策（奖励越大，下一幕越难）。
+## 玩家早就忘了自己在第 3 幕选过什么，但那个选择一直在累加——这才是"选择指向结局"。
+##
+## 每一段恰好三行，和原先把三行尾声塞进结算面板的排版一致：
+## 不是凑数，是结算面板的高度是按三行留的（手机逻辑高只有 540）。
+const ENDINGS: Dictionary = {
+	"dawn": {
+		"name": "黎明",
+		"title": "你走出了城堡",
+		"gate": "西门外 · 黎明",
+		"lead": "十个门里，你挑了最稳的那种",
+		"lines": [
+			"你推开了西门。天在亮，城堡在你背后合上。",
+			"十年里第一次，你看见自己的影子落在地上。",
+			"你逃出来了。这一次没有代价。",
+		],
+		"tint": Color(1.0, 0.92, 0.68),
+	},
+	"throne": {
+		"name": "新的王",
+		"title": "你走出了城堡",
+		"gate": "西门外 · 新的王",
+		"lead": "每一道门你都拿了双份",
+		"lines": [
+			"你走出去时走得很慢，身后的椅子认得你了。",
+			"你带走的东西太多，多到它们替你回头看。",
+			"你逃出来了。城堡换了囚徒——它在笑。",
+		],
+		"tint": Color(0.90, 0.68, 1.0),
+	},
+	"ash": {
+		"name": "烧掉的路",
+		"title": "你走出了城堡",
+		"gate": "西门外 · 灰烬",
+		"lead": "你一路都在往弹上押",
+		"lines": [
+			"你不是推开门，是把门打穿的。",
+			"身后没有城堡了，也没有路，灰落在肩上像雪。",
+			"你逃出来了。只是没有第二个地方可以逃。",
+		],
+		"tint": Color(1.0, 0.66, 0.44),
+	},
+	"gold": {
+		"name": "买下的门",
+		"title": "你走出了城堡",
+		"gate": "西门外 · 金子",
+		"lead": "你一路都在买路",
+		"lines": [
+			"锁是金子敲开的，它自己松了。",
+			"你带出来的箱子比你还重。",
+			"你逃出来了。没有人记得走出来的那个人。",
+		],
+		"tint": Color(1.0, 0.84, 0.36),
+	},
+	"mixed": {
+		"name": "杂色的清晨",
+		"title": "你走出了城堡",
+		"gate": "西门外 · 杂色",
+		"lead": "四样你都试过，一样只拿一点",
+		"lines": [
+			"每一扇门你都试过，每样只拿一点。",
+			"你身上没有一样东西是纯粹的。",
+			"你逃出来了。天亮了，颜色很杂，但没有一种是黑的。",
+		],
+		"tint": Color(0.72, 0.86, 1.0),
+	},
+}
+
+## 结局的固定顺序。序号（"结局 2/5"）和"已解锁 N/5"都读它，
+## 顺序写死在字典遍历里的话，换一个引擎版本就可能变成另一套编号。
+const ENDING_ORDER: Array[String] = ["dawn", "throne", "ash", "gold", "mixed"]
+
+## 门的四种奖励 → 结局。键是 Game 记账用的短名，不是 Portal.Reward 的枚举值：
+## 剧情表不该认识玩法层的枚举（Story 是纯数据，反过来 Portal 还要读 Story 的文案）。
+const CHOICE_KEYS: Array[String] = ["card", "card2", "breach", "gold"]
+const CHOICE_ENDING: Dictionary = {
+	"card": "dawn",
+	"card2": "throne",
+	"breach": "ash",
+	"gold": "gold",
+}
+## 结算面板与确认面板上的单字标签。四门四字，玩家一眼能对上是哪扇门。
+const CHOICE_LABELS: Dictionary = {
+	"card": "稳",
+	"card2": "贪",
+	"breach": "战",
+	"gold": "财",
+}
+## 票数不超过这个值就算"没有主导"→ 走杂色结局。
+## 十次选择分在四类里，最大票数至少是 3；3/3/2/2 这种分布确实没有偏向，
+## 强行从中挑一个会让玩家觉得"我明明每样都拿了，凭什么算我贪"。
+const MIXED_MAX: int = 3
 
 
 static func act_count() -> int:
@@ -261,8 +350,92 @@ static func gauntlet(index: int) -> Dictionary:
 	return GAUNTLET[clampi(index, 0, GAUNTLET.size() - 1)]
 
 
-static func epilogue() -> Array[String]:
+# ---------------------------------------------------------------- 结局
+
+## 十次选门记完账之后，这一局走向哪个结局。
+##
+## 规则按顺序判：
+##   0. 一次都没选 → 黎明（不能落到"杂色"上，那是"四样都试过"）；
+##   1. 最大票数 ≤ MIXED_MAX（3）→ 杂色。四类分散就是"没有偏向"，不硬挑一个；
+##   2. 最大票数唯一 → 直接对应；
+##   3. 并列 → 看**最后一次**选的是哪一个（last_key 在并列组里才生效）。
+##      并列不按固定优先级破，是因为"我最后选了贪"比"表里贪排在前面"更像玩家的意愿。
+static func resolve_ending(choices: Dictionary, last_key: String = "") -> String:
+	var best_key: String = ""
+	var best_n: int = 0
+	var tied: int = 0
+	for key in CHOICE_KEYS:
+		var n: int = int(choices.get(key, 0))
+		if n > best_n:
+			best_n = n
+			best_key = key
+			tied = 1
+		elif n == best_n and n > 0:
+			tied += 1
+	# 一次都没选（自检直接调结算、或者账本被清）→ 按最朴素的那个结局收，
+	# 而不是"杂色"：杂色是"四样都试过"，空账本恰恰是"一样都没选过"。
+	if best_n == 0:
+		return "dawn"
+	if best_n <= MIXED_MAX:
+		return "mixed"
+	if tied > 1 and last_key != "" and int(choices.get(last_key, 0)) == best_n:
+		best_key = last_key
+	return str(CHOICE_ENDING.get(best_key, "dawn"))
+
+
+static func ending(key: String) -> Dictionary:
+	return ENDINGS.get(key, ENDINGS["dawn"])
+
+
+static func ending_order() -> Array[String]:
 	var out: Array[String] = []
-	for line in EPILOGUE:
+	for key in ENDING_ORDER:
+		out.append(key)
+	return out
+
+
+## 一到五。界面上的"结局 2/5"用这个，不直接拿字典下标——
+## 字典顺序不是稳定的接口。
+static func ending_index(key: String) -> int:
+	var i: int = ENDING_ORDER.find(key)
+	return i + 1 if i >= 0 else 1
+
+
+static func ending_title(key: String) -> String:
+	return str(ending(key)["title"])
+
+
+static func ending_name(key: String) -> String:
+	return str(ending(key)["name"])
+
+
+static func ending_gate(key: String) -> String:
+	return str(ending(key)["gate"])
+
+
+static func ending_lead(key: String) -> String:
+	return str(ending(key)["lead"])
+
+
+static func ending_tint(key: String) -> Color:
+	return ending(key)["tint"]
+
+
+static func ending_lines(key: String) -> Array[String]:
+	var out: Array[String] = []
+	for line in ending(key)["lines"]:
 		out.append(str(line))
 	return out
+
+
+## 确认面板底下那行"走到这里"。空表时返回空串，面板会自动少一行。
+## 带上 pending 就把"正在选的这一扇"也算进去——玩家要判断的是"选完之后的形状"。
+static func trail_text(choices: Dictionary, pending_key: String = "") -> String:
+	var parts: PackedStringArray = []
+	for key in CHOICE_KEYS:
+		var n: int = int(choices.get(key, 0)) + (1 if key == pending_key else 0)
+		if n > 0:
+			parts.append("%s %d" % [str(CHOICE_LABELS.get(key, key)), n])
+	if parts.is_empty():
+		return ""
+	return "走过的路：%s" % " · ".join(parts)

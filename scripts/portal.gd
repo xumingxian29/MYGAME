@@ -55,6 +55,10 @@ const LEAVE_RATIO: float = 1.7
 var target: Node2D = null
 var reward: int = Reward.CARD
 var index: int = 0
+## 门上第二行字的覆盖值。只有金门（VICTORY）用：
+## 走到最后的"门外是什么"由这一局的选择决定，门下面得先把那个结局说出来——
+## 否则玩家是"走进门之后才知道自己被分到了哪个结局"，那就不是选择的结果了。
+var subtitle: String = ""
 
 var _age: float = 0.0
 var _armed: bool = false
@@ -214,6 +218,7 @@ func _draw() -> void:
 	var text_alpha: float = 0.92 if _armed else 0.45
 	draw_string(font, Vector2(-70.0, RADIUS + 24.0), reward_text(),
 		HORIZONTAL_ALIGNMENT_CENTER, 140.0, 13, Color(1.0, 0.97, 0.92, text_alpha))
-	var sub: String = "西门外 · 黎明" if reward == Reward.VICTORY else "难度 " + difficulty_text()
+	var sub: String = subtitle if subtitle != "" else (
+		"西门外 · 黎明" if reward == Reward.VICTORY else "难度 " + difficulty_text())
 	draw_string(font, Vector2(-70.0, RADIUS + 40.0), sub,
 		HORIZONTAL_ALIGNMENT_CENTER, 140.0, 12, Color(1.0, 0.76, 0.60, 0.9 * text_alpha))

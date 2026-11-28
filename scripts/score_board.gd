@@ -14,13 +14,14 @@ extends RefCounted
 ##       "runs": 3,
 ##       "total_kills": 128,
 ##       "victories": 1,                                    # 逃出城堡的次数
-##       "best_victory": {score, elapsed, date}             # 最快的一次逃亡
+##       "best_victory": {score, elapsed, date},            # 最快的一次逃亡
+##       "endings": {"dawn": 2, "throne": 1}                # 每个结局各见过几次
 ##     }
 ##   }
 ## }
 ##
-## 旧存档没有 victories / best_victory 两个字段：全部按 0 读，
-## 写回时自然补齐。不做版本迁移——这两个是纯增量，缺了不影响任何已有数据。
+## 旧存档没有 victories / best_victory / endings 三个字段：全部按 0 读，
+## 写回时自然补齐。不做版本迁移——这三个是纯增量，缺了不影响任何已有数据。
 ##
 ## 昵称直接作为 JSON key，所以不需要为文件名做转义。
 
@@ -91,6 +92,7 @@ static func load_profile(raw: String) -> Dictionary:
 		"total_kills": int(entry.get("total_kills", 0)),
 		"victories": int(entry.get("victories", 0)),
 		"best_victory": _normalize_victory(entry.get("best_victory", {})),
+		"endings": _normalize_endings(entry.get("endings", {})),
 	}
 
 
@@ -128,12 +130,20 @@ static func submit(raw: String, run: Dictionary) -> Dictionary:
 				"date": Time.get_datetime_string_from_system(false, true),
 			}
 
+	# 结局图鉴：只在这一局真的走出去时才 +1。见过的结局不重复计数到别的地方，
+	# "已解锁 N/5"就是这里的 key 数量——玩家追的是"见过几种"，不是"刷了几次"。
+	var endings: Dictionary = _normalize_endings(entry.get("endings", {}))
+	var ending_key: String = str(run.get("ending", ""))
+	if victory and not ending_key.is_empty():
+		endings[ending_key] = int(endings.get(ending_key, 0)) + 1
+
 	players[key] = {
 		"best": best,
 		"runs": int(entry.get("runs", 0)) + 1,
 		"total_kills": int(entry.get("total_kills", 0)) + int(run.get("kills", 0)),
 		"victories": victories,
 		"best_victory": best_victory,
+		"endings": endings,
 	}
 	data["players"] = players
 	data["last_player"] = key
@@ -158,6 +168,7 @@ static func list_players() -> Array[Dictionary]:
 			"runs": int(entry.get("runs", 0)),
 			"total_kills": int(entry.get("total_kills", 0)),
 			"victories": int(entry.get("victories", 0)),
+			"endings": _normalize_endings(entry.get("endings", {})),
 			"date": str(best["date"]),
 		})
 	out.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
@@ -232,6 +243,30 @@ static func _write(data: Dictionary) -> void:
 		return
 	file.store_string(JSON.stringify(data, "\t"))
 	file.close()
+
+
+## 结局图鉴：{"dawn": 2, "throne": 1}。值一律转成 int——
+## JSON 读回来是 float，界面上会出现"黎明 2.0 次"。
+static func _normalize_endings(raw: Variant) -> Dictionary:
+	var src: Dictionary = raw if typeof(raw) == TYPE_DICTIONARY else {}
+	var out: Dictionary = {}
+	for key in src.keys():
+		var n: int = int(src[key])
+		if n > 0:
+			out[str(key)] = n
+	return out
+
+
+## 已经见过几种结局。界面上的"已解锁 N/5"直接读这个，
+## 不在这里判"哪些 key 是合法的"——非法 key 只会让分母虚高，
+## 而那需要存档被人手改过，不是正常的失败路径。
+static func count_endings(profile: Dictionary) -> int:
+	return _normalize_endings(profile.get("endings", {})).size()
+
+
+## 名单里的结局图鉴，给主菜单用。
+static func endings_of(raw: String) -> Dictionary:
+	return load_profile(raw)["endings"]
 
 
 ## 胜利档：只有三个数。它是"最快逃亡"的记录，不是分数榜的副本。

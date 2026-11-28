@@ -95,6 +95,14 @@ func _build() -> void:
 	route.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_box.add_child(route)
 
+	# 门的选择决定结局这件事，必须在菜单就说一次。
+	# 只写在结算里的话，玩家会以为那五个结局是随机给的——
+	# 而"我这一局一直在拿双卡"这种"我选的"感觉，才是二周目的理由。
+	var endings_line := UiKit.label("每一道门怎么选，决定门外是哪一种结局（共 %d 种）"
+		% Story.ending_order().size(), 12, Color(0.78, 0.70, 0.86))
+	endings_line.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_box.add_child(endings_line)
+
 	_box.add_child(UiKit.divider())
 	_build_class_picker()
 

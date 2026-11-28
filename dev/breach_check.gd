@@ -247,25 +247,34 @@ func _test_table() -> void:
 	# 0.6 从 Game 读而不是写死——bot.gd 曾把圈归零写死成 690，
 	# 表一改断言就永远报 0，那种"改表即失效"的校验比没有更坏。
 	var fight_scale: float = float(load("res://scripts/game.gd").BREACH_BOSS_FIGHT_SCALE)
-	var fight_total: float = 0.0
 	for i in range(Stage.COUNT):
 		var st: Dictionary = Stage.at(i)
 		var fight: float = float(st["breach_shots"]) * float(st["breach_every"]) * fight_scale
-		fight_total += fight
 		_check("第 %d 章单场 Boss 约 %.0fs（25~45s）" % [i + 1, fight],
 			fight >= 25.0 and fight <= 45.0, "实际 %.1fs" % fight)
-	# 时长预算：章节 + 三场 Boss 必须塞得进毒圈，而且要留出余量。
-	# 这一条原来写死成「fight_total <= 130」，是"改表即失效"的同一类问题：
-	# 圈从 480 压到 304 时它照样报 ok，而实际上根本打不完第三章。
-	# 现在两边都从表里读——Stage 的 length 与 Zone 的末段 to，改任一表自动重算。
-	var stage_total: float = 0.0
-	for i in range(Stage.COUNT):
-		stage_total += float(Stage.at(i)["length"])
-	var zone_cap: float = float(Zone.SEGMENTS[Zone.SEGMENTS.size() - 1]["to"])
-	var slack: float = zone_cap - stage_total - fight_total
-	_check("章节 %.0fs + Boss %.0fs = %.0fs，毒圈 %.0fs 余 %.0fs（≥20s）" % [
-		stage_total, fight_total, stage_total + fight_total, zone_cap, slack,
-	], slack >= 20.0, "余量只有 %.0fs，第三章的 Boss 会在圈归零后出现" % slack)
+	# 时长预算（2026-11-28 重定口径）：毒圈已经不在 world 里，"三章 + 三场 Boss
+	# 塞进 390 秒"这条旧断言随之作废——它量的是一个已经不存在的东西。
+	# 现在的目标是**每章约三分钟**：一章 = 刷怪 length + 一场 Boss + 挑门与剧情。
+	# 一律从表里算，改 length 或改发数都会自动重算这一条。
+	const PORTAL_OVERHEAD: float = 12.0
+	var run_total: float = 0.0
+	for i in range(Story.ACT_COUNT):
+		var st: Dictionary = Stage.at(i)
+		var fight: float = float(st["breach_shots"]) * float(st["breach_every"]) * fight_scale
+		var chapter: float = float(st["length"]) + fight + PORTAL_OVERHEAD
+		run_total += chapter
+		_check("第 %d 幕约 %.0fs（165~200s，三分钟上下）" % [i + 1, chapter],
+			chapter >= 165.0 and chapter <= 200.0, "实际 %.1fs" % chapter)
+	# 王座厅：五位守门人 12/14/16/18/20 发 + 四次 2.4 秒的空档，按每发一个窗口算。
+	var throne: float = 0.0
+	for i in range(Story.gauntlet_count()):
+		var shots: int = int(load("res://scripts/game.gd").GAUNTLET_BASE_SHOTS) \
+			+ int(load("res://scripts/game.gd").GAUNTLET_SHOT_STEP) * i
+		throne += float(shots) * float(load("res://scripts/game.gd").GAUNTLET_BREACH_EVERY)
+	throne += float(Story.gauntlet_count() - 1) * float(load("res://scripts/game.gd").GAUNTLET_GAP)
+	var run_min: float = (run_total + throne) / 60.0
+	_check("一局 %d 幕 + 王座厅约 %.1f 分钟（25~35 分）" % [Story.ACT_COUNT, run_min],
+		run_min >= 25.0 and run_min <= 35.0, "实际 %.1f 分钟" % run_min)
 
 	# 第四幕起的发数**不再逐幕上涨**。十幕 + 王座厅的一局里，
 	# 每幕 +4 发、掉率每幕慢 0.6 秒，到第 10 幕就是"60 发 × 4.4 秒 = 四分钟一场"，

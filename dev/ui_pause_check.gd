@@ -149,6 +149,10 @@ func _run() -> void:
 	game._elapsed = 823.0
 	game._kills = 612
 	game._level = 34
+	# 用"杂色"这个结局来量高度，而不是默认的"黎明"：
+	# 它的名字加那句由来是全五个里最长的一行，排版最挤的那一种才该被钉住。
+	game._gate_trail = {"card": 3, "card2": 3, "breach": 2, "gold": 2}
+	game._last_choice = "gold"
 	game._on_victory()
 	await process_frame
 	await process_frame

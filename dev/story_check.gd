@@ -61,10 +61,66 @@ func _run() -> void:
 	_check("菜单引子提到王子", Story.prologue().contains("王子"), Story.prologue())
 	_check("商人有台词", not Story.merchant_line().is_empty())
 	_check("死亡标题带幕号", Story.defeat_title(6).contains("第七幕"), Story.defeat_title(6))
-	_check("收尾三行", Story.epilogue().size() == 3)
 	_check("终章有独立台词", Story.finale_lines().size() == 3)
 	_check("终章标题写着终章", Story.finale_title().contains("终章"), Story.finale_title())
 	_check("终章不占幕号", not Story.finale_title().contains("幕"), Story.finale_title())
+
+	print("\n[五个结局]")
+	var order: Array[String] = Story.ending_order()
+	_check("一共五个结局", order.size() == 5, "%d" % order.size())
+	var unique_endings: Dictionary = {}
+	var ending_ok: bool = true
+	var longest_ending: int = 0
+	for key in order:
+		var e: Dictionary = Story.ending(key)
+		unique_endings[str(e["name"])] = true
+		# 三行是有原因的：结算面板的高度是按三行留的（手机逻辑高只有 540）
+		if Story.ending_lines(key).size() != 3:
+			ending_ok = false
+		if str(e["gate"]).is_empty() or str(e["lead"]).is_empty():
+			ending_ok = false
+		if not str(e["gate"]).begins_with("西门外"):
+			ending_ok = false
+		if str(e["title"]).is_empty():
+			ending_ok = false
+		for line in Story.ending_lines(key):
+			longest_ending = maxi(longest_ending, line.length())
+	_check("每个结局 3 行 + 有门外名/一句由来/大标题", ending_ok)
+	_check("五个名字不重复", unique_endings.size() == 5, "%d 个" % unique_endings.size())
+	_check("结局台词单行不超过 26 字", longest_ending <= 26, "最长 %d" % longest_ending)
+	_check("序号与顺序表一致",
+		Story.ending_index("dawn") == 1 and Story.ending_index("mixed") == 5,
+		"%d / %d" % [Story.ending_index("dawn"), Story.ending_index("mixed")])
+
+	# 判定表。每一行 = [账本, 最后一次选的, 期望结局]。
+	# 这几行是这个系统的全部规则：一个数错了，玩家会走到"我明明一直拿双卡却看到黎明"。
+	var cases: Array = [
+		[{"card": 10}, "", "dawn"],
+		[{"card2": 10}, "", "throne"],
+		[{"breach": 10}, "", "ash"],
+		[{"gold": 10}, "", "gold"],
+		[{"card": 3, "card2": 3, "breach": 2, "gold": 2}, "", "mixed"],
+		[{"card": 4, "card2": 4, "breach": 1, "gold": 1}, "card2", "throne"],
+		[{"card": 4, "card2": 4, "breach": 1, "gold": 1}, "card", "dawn"],
+		[{"card2": 5, "gold": 3, "card": 2}, "", "throne"],
+		[{"breach": 4, "gold": 3, "card": 3}, "gold", "ash"],
+		[{}, "", "dawn"],
+	]
+	var resolve_ok: bool = true
+	var resolve_detail: String = ""
+	for row in cases:
+		var got: String = Story.resolve_ending(row[0], str(row[1]))
+		if got != str(row[2]):
+			resolve_ok = false
+			resolve_detail += "%s+%s→%s(期望 %s) " % [str(row[0]), str(row[1]), got, str(row[2])]
+	_check("十种账本 → 五个结局", resolve_ok, resolve_detail)
+
+	_check("路径文案只列选过的门",
+		Story.trail_text({"card": 2}) == "走过的路：稳 2", Story.trail_text({"card": 2}))
+	_check("路径文案把正在选的这扇也算进去",
+		Story.trail_text({"card": 2}, "gold").contains("财 1"),
+		Story.trail_text({"card": 2}, "gold"))
+	_check("空账本不显示路径", Story.trail_text({}).is_empty())
 
 	print("\n[王座厅]")
 	_check("五位守门人", Story.gauntlet_count() == 5, "%d" % Story.gauntlet_count())
@@ -212,6 +268,11 @@ func _run() -> void:
 	game.story_panel.skip()
 	await process_frame
 	_check("第 2 幕开始后幕号推进", game._map_index == 1, "map=%d" % game._map_index)
+	# 选门要记进账本：结算时判结局、确认面板上"走过的路"都读这份账。
+	# 不记账的话，十个选择就白选了——而玩家不会知道，因为结算照样能出。
+	_check("穿门记了一笔账", int(game._gate_trail.get("card", 0)) == 1,
+		str(game._gate_trail))
+	_check("最后一次选择被记住", game._last_choice == "card", game._last_choice)
 
 
 func _all_texts() -> Array[String]:
@@ -230,8 +291,14 @@ func _all_texts() -> Array[String]:
 	for i in range(Story.gauntlet_count()):
 		out.append(str(Story.gauntlet(i)["name"]))
 		out.append(str(Story.gauntlet(i)["line"]))
-	for line in Story.epilogue():
-		out.append(line)
+	# 五个结局的全部文字（名字、门外名、一句由来、三行收尾）
+	for key in Story.ending_order():
+		out.append(Story.ending_title(key))
+		out.append(Story.ending_name(key))
+		out.append(Story.ending_gate(key))
+		out.append(Story.ending_lead(key))
+		for line in Story.ending_lines(key):
+			out.append(line)
 	# 终章
 	out.append(Story.finale_title())
 	out.append(Story.finale_beat())
@@ -259,13 +326,20 @@ func _all_texts() -> Array[String]:
 		"塔里的商人",
 		"走出城堡？",
 		"进入下一幕？",
-		"西门外是黎明。",
+		"西门外是「%s」。",
 		"这扇门给的是：结算本局，记下分数",
 		"走出去",
 		"再逛逛",
 		"第 %d/%d 幕",
 		"王子 · 黑暗城堡 · 十道门",
 		"穿过十道门 · 王座厅连战五位守门人 · 走出西门即逃离",
+		"每一道门怎么选，决定门外是哪一种结局（共 %d 种）",
+		"结局 %d/%d · %s　——　%s",
+		"已解锁 %d/%d 个结局",
+		"五个结局，你都见过了",
+		"走过的路：%s",
+		"稳 0 · 贪 0 · 战 0 · 财 0",
+		"门外是「%s」——十道门是怎么走的，这里就长什么样",
 		"逃出 %d",
 		"第 %d 幕 · 王座厅　·　守门人 %d/%d",
 		"击杀",

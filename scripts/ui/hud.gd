@@ -600,7 +600,8 @@ func set_gold(amount: int) -> void:
 ## HUD 不认识剧情表，也不该认识——否则改一句台词要改两个文件。
 ## final = 最后一扇门（胜利门），它不通向下一幕，所以三级文案都要换。
 func open_portal_confirm(reward_text: String, current_text: String, next_text: String,
-		next_power_pct: int, final: bool = false) -> void:
+		next_power_pct: int, final: bool = false, trail: String = "",
+		ending_name: String = "") -> void:
 	_clear_panel()
 	_dim.visible = true
 	_panel.visible = true
@@ -610,7 +611,8 @@ func open_portal_confirm(reward_text: String, current_text: String, next_text: S
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(title)
 
-	var body_text: String = "西门外是黎明。\n这扇门给的是：结算本局，记下分数"
+	var door: String = ending_name if not ending_name.is_empty() else "黎明"
+	var body_text: String = "西门外是「%s」。\n这扇门给的是：结算本局，记下分数" % door
 	if not final:
 		body_text = "%s → %s　·　敌人属性 +%d%%\n这扇门给的是：%s" % [
 			current_text, next_text, next_power_pct, reward_text,
@@ -619,6 +621,15 @@ func open_portal_confirm(reward_text: String, current_text: String, next_text: S
 	body.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_panel_box.add_child(body)
+
+	# 走过的路。放在按钮正上方、代价提示的上面：玩家读完"这扇门给什么"，
+	# 紧接着看到"我这一路是怎么选的"，两个信息在同一个视线里。
+	# 这条不清空的话，四门在玩家眼里就只是"哪个奖励更值"，而不是"我在往哪走"。
+	if not trail.is_empty():
+		var path_label := _make_label(trail, 13, Color(0.74, 0.82, 0.96))
+		path_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		path_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_panel_box.add_child(path_label)
 
 	var warn := _make_label(
 		"走出去，这一局就结束了" if final else "传送不回血，也不清空金币",
@@ -1015,8 +1026,9 @@ func show_victory(result: Dictionary) -> void:
 
 	var profile: Dictionary = result["profile"]
 	var best: Dictionary = profile["best"]
+	var key: String = str(result.get("ending", "dawn"))
 
-	var title := _make_label("你走出了城堡", _panel_f(32), Color(1.0, 0.92, 0.62))
+	var title := _make_label(Story.ending_title(key), _panel_f(32), Color(1.0, 0.92, 0.62))
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(title)
 
@@ -1027,10 +1039,20 @@ func show_victory(result: Dictionary) -> void:
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(sub)
 
-	# 收尾旁白：三行，一行一句。放在分数上面，是因为它们是这一局"结束"的信号，
-	# 玩家扫一眼就去看数字了——反过来放会在分数之后被完全忽略。
-	for line in Story.epilogue():
-		var node := _make_label(line, _panel_f(13), Color(0.80, 0.78, 0.90))
+	# 结局编号用"结局 2/5"而不是只写名字：玩家第一次看到这一行就会知道
+	# "还有别的结局"，而那正是这一局唯一值得再开一局的理由。
+	var tint: Color = Story.ending_tint(key)
+	var ending_label := _make_label("结局 %d/%d · %s　——　%s" % [
+		Story.ending_index(key), Story.ending_order().size(),
+		Story.ending_name(key), Story.ending_lead(key),
+	], _panel_f(15), tint)
+	ending_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ending_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_panel_box.add_child(ending_label)
+
+	# 这一局的三行收尾。每个结局一套：门外是什么，由十次选门决定。
+	for line in Story.ending_lines(key):
+		var node := _make_label(line, _panel_f(13), Color(0.84, 0.84, 0.94))
 		node.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		node.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		_panel_box.add_child(node)
@@ -1090,6 +1112,17 @@ func show_victory(result: Dictionary) -> void:
 	], _panel_f(13), Color(1.0, 0.82, 0.58))
 	count.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_panel_box.add_child(count)
+
+	# "已解锁 3/5"：这一行的唯一作用是把五个结局的总量摊开给玩家看。
+	# 没有它，"结局 2/5" 会被读成"这一局有 2 个结局"，而不是"我一共见过 2 种"。
+	var seen: int = ScoreBoard.count_endings(profile)
+	var total_endings: int = Story.ending_order().size()
+	var seen_label := _make_label(
+		"已解锁 %d/%d 个结局" % [seen, total_endings] if seen < total_endings
+		else "五个结局，你都见过了",
+		_panel_f(13), Color(0.78, 0.84, 0.94))
+	seen_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_panel_box.add_child(seen_label)
 
 	_panel_box.add_child(_make_action_row())
 	if not _touch_mode:
