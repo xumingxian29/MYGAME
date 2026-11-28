@@ -1,6 +1,6 @@
 extends SceneTree
 
-## 本文件是 dev/bot.gd 的副本，只改了两处：输出到 bot_boss.txt、LIMIT 480。
+## 本文件是 dev/bot.gd 的副本，只改了两处：输出到 bot_boss.txt、跑动上限放宽到圈归零 + 10s。
 ## 原因：另一个进程同时在跑 bot.gd 写 bot.txt，两个进程互相覆盖输出分不清是谁的。
 
 ## 平衡回归 bot：固定种子 + 固定策略，量化"站桩 vs 绕圈"和成长曲线。
@@ -16,9 +16,10 @@ extends SceneTree
 ##   kite_ranged 射手绕圈走位、技能好了就放（远程职业：验证"Boss 优先索敌"那条路径）
 ## 必须覆盖远程职业：战士没有远程武器，只用战士测的话子弹相关改动完全测不到。
 
-## 480 秒 = 8 分钟，正好等于毒圈归零时刻：这一份只用来量 Boss 战，
-## 圈一归零所有人必死，跑更长没有信息量。
-const LIMIT: float = 480.0
+## 跑动上限 = 毒圈归零时刻 + 10 秒。这一份只用来量 Boss 战，圈一归零所有人必死，
+## 跑更长没有信息量。从 Zone 表读而不是写 480——写死之后圈改成 5:04，
+## 这份副本还在按 8:00 空跑，白烧掉一半时间。
+var _limit: float = 0.0
 const BLOCK: float = 30.0
 const SEEDS: Array[int] = [11, 12, 13]
 
@@ -94,7 +95,7 @@ func _process(delta: float) -> bool:
 		_next_run()
 		return false
 
-	if _game._elapsed >= LIMIT:
+	if _game._elapsed >= _limit:
 		_summary("到时限")
 		_next_run()
 		return false
@@ -313,12 +314,20 @@ func _median(values: Array[float]) -> float:
 	return (sorted[n / 2 - 1] + sorted[n / 2]) * 0.5
 
 
+## 一局的理论上限从 Zone 表里读，不在测试里写死。
+## 写死的代价：时间轴从 8:00 改成 5:04 之后，这个数还停在旧值，
+## 结果要么整天报"撞上限"，要么白跑几分钟——一个改表就失效的指标比没有指标更坏。
+func _zone_cap() -> float:
+	var segs: Array = Zone.SEGMENTS
+	return float(segs[segs.size() - 1]["to"])
+
+
 ## 汇总表。看三个数：中位存活（目标 5-10 分钟）、最长（不得超过圈归零时间）、
 ## 圈外死亡占比（目标 15%-35%）。没有毒圈的版本看"最长"就知道现在能拖多久。
 func _aggregate() -> String:
 	var lines: PackedStringArray = []
 	lines.append("")
-	lines.append("=== 汇总  n=%d 局  上限 %.0fs ===" % [_results.size(), LIMIT])
+	lines.append("=== 汇总  n=%d 局  上限 %.0fs ===" % [_results.size(), _limit])
 	var order: Array[String] = []
 	var all_wall: Array[float] = []
 	for r in _results:
@@ -350,7 +359,7 @@ func _aggregate() -> String:
 		])
 	var timeout: int = 0
 	for w in all_wall:
-		if w >= LIMIT - 0.5:
+		if w >= _limit - 0.5:
 			timeout += 1
 	lines.append("总体：中位 %5.1fs  最长 %5.1fs  触及上限 %d 局（上限就是圈归零时刻）" % [
 		_median(all_wall), all_wall.max() if not all_wall.is_empty() else 0.0, timeout,

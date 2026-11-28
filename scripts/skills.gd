@@ -39,7 +39,7 @@ static func cast(hero: int, player: Player, enemies: Array[Enemy]) -> void:
 static func _whirlwind(player: Player, enemies: Array[Enemy]) -> void:
 	player.grant_invuln(WHIRL_INVULN)
 	player.spawn_skill_fx(WHIRL_RADIUS, Color(1.0, 0.6, 0.35))
-	player.add_trauma(0.5)
+	player.add_trauma(0.40)
 
 	for enemy in enemies:
 		if not is_instance_valid(enemy) or enemy.is_queued_for_deletion():
@@ -57,7 +57,7 @@ static func _whirlwind(player: Player, enemies: Array[Enemy]) -> void:
 ## 法师：大范围爆伤 + 减速。范围大到能清掉贴脸的一圈，但冷却最久（回蓝最慢）。
 static func _nova(player: Player, enemies: Array[Enemy]) -> void:
 	player.spawn_skill_fx(NOVA_RADIUS, Color(0.72, 0.5, 1.0))
-	player.add_trauma(0.45)
+	player.add_trauma(0.35)
 
 	for enemy in enemies:
 		if not is_instance_valid(enemy) or enemy.is_queued_for_deletion():
@@ -73,6 +73,6 @@ static func _nova(player: Player, enemies: Array[Enemy]) -> void:
 static func _arrow_rain(player: Player) -> void:
 	player.grant_invuln(ARROW_INVULN)
 	player.spawn_skill_fx(90.0, Color(0.45, 0.95, 0.7))
-	player.add_trauma(0.35)
+	player.add_trauma(0.27)
 	if player.bullet_weapon != null:
 		player.bullet_weapon.fire_ring(ARROW_COUNT, ARROW_DAMAGE_SCALE, ARROW_PIERCE)

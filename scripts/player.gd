@@ -14,6 +14,25 @@ signal skill_cast(hero: int)
 ## 相机缩放。Game 的刷怪距离按“刚好在视野外”计算，改动此处需同步刷怪距离。
 const CAMERA_ZOOM: float = 1.35
 const INVULN_TIME: float = 0.45
+
+## 脱战回血：最后 REGEN_DELAY 秒没挨打，就按最大生命的 REGEN_RATE/秒 往回补。
+##
+## 为什么需要一条独立于成长的回血曲线：实测 seed 11~13（n=6）里，活到 394 秒的
+## 三局和 136~209 秒就死的三局，在场敌人（50.0 / 49.9）、等级（29 / 28）、
+## 卡数（15 / 15）几乎完全相同，唯一的差别是血量 168 / 9。
+## 原来回血只有升级那一下（Game.LEVEL_HEAL_RATIO 6%），于是"缺血 → 清怪慢 →
+## 经验少 → 升级慢 → 回得更少"构成死亡螺旋，强者满血溢出、弱者一路滑到 0。
+## 续航必须和成长解耦，否则它只会放大方差。
+##
+## 2.5 秒这个值不是拍的：实测受击频率 0.18 次/秒（平均 5.5 秒挨一下），
+## 窗口比间隔短一半，实战里大多数时候都成立。
+const REGEN_DELAY: float = 2.5
+## 战士 180 血 → 1.08/秒，约等于实测掉血率（第 1 局 90~195 秒掉 126 血 = 1.2/秒）
+## 的九成：足够把"必死"拖成"能撑过第二只 Boss"，又不至于让满血的人变无敌。
+const REGEN_RATE: float = 0.006
+## 每 0.25 秒结算一次。逐帧 heal() 会逐帧发 health_changed，HUD 的血条与低血红边
+## 就会以 60Hz 重建，看起来像条在自己抖。
+const REGEN_TICK: float = 0.25
 const BODY_RADIUS: float = 14.0
 const FLASH_TIME: float = 0.18
 const FLASH_COLOR: Color = Color(2.2, 1.2, 1.2)
@@ -22,10 +41,29 @@ const SKILL_FX_TIME: float = 0.45
 
 ## 屏幕震动用 trauma 模型：伤害累加 trauma，随时间线性衰减，位移取 trauma² 作幅度。
 ## 平方的意义是"轻击几乎不抖、重击抖得明显"，比直接用线性强度更像有重量。
-const TRAUMA_DECAY: float = 1.7
-## 位移幅度上限。实测 trauma=0.55（一次受击）时峰值约 6px：
+const TRAUMA_DECAY: float = 1.9
+## 位移幅度上限（世界单位，1 单位 = 1.35 屏幕像素，zoom=1.35）。
+## 实测 trauma=0.50（一次受击）时峰值约 5 单位 ≈ 7 屏幕像素：
 ## 打在 853 宽的世界视野里刚好"看得见但不晕"，再大就开始影响读屏了。
+## 注意峰值 = amp × 0.78（两个轴四项正弦之和最大 1.3，再乘 0.6）。
 const SHAKE_MAX_OFFSET: float = 26.0
+
+## 震动主频（Hz）。这是"后期屏幕看着震荡"的真正病根，改之前是等效 12~27Hz：
+## 每帧相位推进 = 360° × hz / 60，旧版 46rad/s × (1.7~3.7) 落在 12.4/16.8/21.2/27.1Hz，
+## 也就是**每帧推进 75°~127°**。一帧转过 90°，下一帧的方向和这一帧没有关系，
+## 采样出来是白噪声——玩家看到的不是"晃了一下"，而是画面每帧随机跳一个位置。
+## 5.4Hz 每帧只推进 32°，约 5.6 帧走完半个周期，才读得出"整块画面被推了一下"的惯性。
+const SHAKE_HZ: float = 5.4
+## 细节分量：倍频与权重。倍频不能高——1.6×5.4=8.6Hz 已经是每帧 52°，
+## 再往上又会回到"每帧换方向"，所以只给 0.3 权重当纹理，不当主体。
+const SHAKE_FINE_MUL: float = 1.6
+const SHAKE_FINE_WEIGHT: float = 0.3
+## 幅度死区（世界单位）。amp 低于它时整屏位移不到 1 像素：玩家看不见，
+## 但会一直"嗡"。改之前后期击杀密集（13~25 只/秒 × 0.04）会把 trauma
+## 顶到稳态 0.4（amp≈4），正好落在"看得见一点、又永远不停"这个最难受的区间。
+## 现在击杀已不再注入 trauma，加这道死区是第二重保险：
+## 宁可少一点"战场在动"，也不要永不停歇的微抖。
+const SHAKE_DEADZONE: float = 0.9
 
 ## 职业：决定血量 / 速度 / 武器 / 主动技能。必须在 add_child 之前赋值，
 ## 因为 _ready 里要按职业装配武器节点。
@@ -39,6 +77,10 @@ var move_speed: float = 240.0
 
 var enemies: Array[Enemy] = []
 
+## 音效引用，由 Game 注入。Player 不自己建音频节点——
+## 音频需要跨局复用（换角色不该重建 20 个 player），生命周期比 Player 长。
+var audio: GameAudio = null
+
 var bullet_weapon: BulletWeapon
 var melee_weapon: MeleeWeapon
 var orbit_weapon: OrbitWeapon
@@ -48,6 +90,10 @@ var camera: Camera2D
 
 ## 受击无敌帧：避免被一群敌人同时贴身时瞬间融化
 var _invuln: float = 0.0
+## 距允许回血还剩多久（任一受伤入口都会重置成 REGEN_DELAY），
+## 以及回血结算的累加器（按 REGEN_TICK 合并，避免逐帧发信号）
+var _regen_wait: float = 0.0
+var _regen_acc: float = 0.0
 ## 闪白剩余时长，倒数计时替代 Tween（理由同 Enemy）
 var _flash_t: float = 0.0
 ## 当前震动强度 0~1，以及正弦相位（累加而不是取时间，避免暂停后跳变）
@@ -55,6 +101,10 @@ var _trauma: float = 0.0
 var _shake_t: float = 0.0
 ## 技能扩散圆环：半径与颜色由 HeroSkill 写入，这里只负责画
 var _skill_fx_t: float = 0.0
+## 迷宫地图由 Game 在开局时注入（组合优于反查 get_parent）。
+## 为 null 时移动逻辑保持原样，单独跑 Player 场景或旧自检都不会崩。
+var maze: MazeMap = null
+
 var _skill_fx_radius: float = 0.0
 var _skill_fx_color: Color = Color.WHITE
 
@@ -132,13 +182,49 @@ func _configure_ranged_weapon() -> void:
 			bullet_weapon.enabled = false
 
 
+## 震动只在渲染帧推进，不放在 _physics_process 里。
+## 物理固定 60 次/秒，渲染可能是 30（掉帧）或 120（高刷屏）。
+## 两者不对齐时，同一个 offset 会被连续两帧共用、第三天再补两格，
+## 阶梯式位移比原本的抖动还难看。凡是"只影响画面"的量，就该跟着渲染帧走。
+func _process(delta: float) -> void:
+	_tick_shake(delta)
+
+
+## 暂停时 _process 不再推进，相机偏移会永久冻在最后一帧的位置——
+## 升级选卡面板、结算页背后的世界就是歪的，最多歪 34 像素。
+## 这里在暂停瞬间回正，比在每个暂停入口手动清理更可靠（暂停入口还会继续增加）。
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PAUSED and _trauma > 0.0:
+		_trauma = 0.0
+		if camera != null:
+			camera.offset = Vector2.ZERO
+
+
 func _physics_process(delta: float) -> void:
 	_invuln = maxf(_invuln - delta, 0.0)
+	_tick_regen(delta)
 	_tick_flash(delta)
-	_tick_shake(delta)
 	_tick_mana(delta)
 	_tick_skill_fx(delta)
 	_move(delta)
+
+
+## 脱战回血。两个受伤入口都会把 _regen_wait 重置成 REGEN_DELAY，
+## 所以"一直在挨打"时这条曲线完全不工作——它只奖励成功脱离接触。
+func _tick_regen(delta: float) -> void:
+	if health <= 0.0 or health >= max_health:
+		# 满血时也把累加器清掉，否则下一次掉血会立刻吐出一大口"攒着"的回复
+		_regen_acc = 0.0
+		return
+	if _regen_wait > 0.0:
+		_regen_wait = maxf(_regen_wait - delta, 0.0)
+		_regen_acc = 0.0
+		return
+	_regen_acc += delta
+	if _regen_acc < REGEN_TICK:
+		return
+	heal(max_health * REGEN_RATE * _regen_acc)
+	_regen_acc = 0.0
 
 
 ## 自然回蓝。只在整数变化时才发信号：每帧发信号会让 HUD 每帧重建一次字符串，
@@ -202,6 +288,8 @@ func add_trauma(amount: float) -> void:
 
 ## 位移用两个不同频率的正弦叠加而不是每帧 randf()：随机值在 60fps 下会变成高频噪点，
 ## 看起来像画面撕裂，正弦叠加才有"整块画面被推了一下"的惯性感。
+## 但**正弦的频率必须落在 60fps 能表达的范围里**——这一条以前没被当回事，
+## 见 SHAKE_HZ 的注释：12~27Hz 的正弦在 60fps 下的采样结果和随机数没有区别。
 func _tick_shake(delta: float) -> void:
 	if camera == null:
 		return
@@ -210,12 +298,21 @@ func _tick_shake(delta: float) -> void:
 			camera.offset = Vector2.ZERO
 		return
 	_trauma = maxf(_trauma - TRAUMA_DECAY * delta, 0.0)
-	_shake_t += delta * 46.0
+	_shake_t += delta * TAU * SHAKE_HZ
 	var amp: float = SHAKE_MAX_OFFSET * _trauma * _trauma
+	# 死区：屏幕位移不到 1 像素的震动一律不发。这里不做平滑过渡，
+	# 因为"逐渐消失到 0"的过程本身就是一段永远停不下来的微抖。
+	if amp < SHAKE_DEADZONE:
+		if camera.offset != Vector2.ZERO:
+			camera.offset = Vector2.ZERO
+		return
+	# 两个轴用略微不同的倍频（1.0 / 1.19），避免 x、y 同相时走成一条斜直线。
+	# 四项之和最大 1.3，乘 0.6 后峰值为 0.78×amp，与旧版 0.8×amp 的力度一致。
+	var t: float = _shake_t
 	var offset := Vector2(
-		sin(_shake_t * 1.7) + sin(_shake_t * 2.9) * 0.6,
-		cos(_shake_t * 2.3) + cos(_shake_t * 3.7) * 0.6
-	) * (amp * 0.5)
+		sin(t) + sin(t * SHAKE_FINE_MUL) * SHAKE_FINE_WEIGHT,
+		cos(t * 1.19) + cos(t * SHAKE_FINE_MUL * 1.05) * SHAKE_FINE_WEIGHT
+	) * (amp * 0.6)
 	camera.offset = offset
 
 
@@ -223,7 +320,11 @@ func _move(delta: float) -> void:
 	var dir: Vector2 = _input_dir()
 	if dir == Vector2.ZERO:
 		return
-	global_position += dir * move_speed * delta
+	var to: Vector2 = global_position + dir * move_speed * delta
+	# 墙是网格数据不是物理体，位移末尾夹一次：先试完整位移，再试沿轴滑动，能贴墙走
+	if maze != null:
+		to = maze.constrain(global_position, to, BODY_RADIUS)
+	global_position = to
 
 
 ## 走 InputMap（project.godot 的 [input] 段）而不是硬编码键码：
@@ -236,6 +337,7 @@ func take_damage(amount: float) -> void:
 	if health <= 0.0 or _invuln > 0.0:
 		return
 	_invuln = INVULN_TIME
+	_regen_wait = REGEN_DELAY
 	health = maxf(health - amount, 0.0)
 	health_changed.emit(health, max_health)
 	_flash()
@@ -246,7 +348,11 @@ func take_damage(amount: float) -> void:
 			camera.offset = Vector2.ZERO
 		died.emit()
 		return
-	add_trauma(0.55)
+	add_trauma(0.50)
+	# 致死的那一下不播受伤音：死亡音效（dead）更长更明确，
+	# 两个叠在一起会把"你死了"这个信息糊掉。
+	if audio != null:
+		audio.play("hurt")
 
 
 ## 圈外（毒）伤害：独立入口，不走 take_damage()。
@@ -261,6 +367,8 @@ func take_damage(amount: float) -> void:
 func take_zone_damage(amount: float) -> void:
 	if health <= 0.0 or amount <= 0.0:
 		return
+	# 毒伤同样算"挨打"：站在圈外还想回血，等于把圈外惩罚抹掉
+	_regen_wait = REGEN_DELAY
 	health = maxf(health - amount, 0.0)
 	health_changed.emit(health, max_health)
 	if health <= 0.0:

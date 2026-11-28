@@ -122,7 +122,7 @@ func _on_boss_spawned() -> void:
 	])
 	_check("Boss 战区块", _game.hud._boss_panel.visible, "Boss 血条没有显示")
 	_check("章节条变红", _game.hud._stage_boss, "Boss 期间章节栏应切成关底状态")
-	_game._boss.take_damage(1e9)
+	_game._boss.take_damage(1e9, true)
 	_wait = 3
 	_step = 2
 

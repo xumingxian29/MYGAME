@@ -13,4 +13,6 @@ build/
 .workbuddy/*.txt
 .workbuddy/*.png
 .workbuddy/backup/
+.workbuddy/backup-*/
+.workbuddy/*.bak-*
 .wbapp_*.genie

@@ -3,7 +3,10 @@ extends Node2D
 ## 游戏总控：刷怪、经验与升级规则、暂停与重开。界面全部交给 GameHud。
 ## 该节点 process_mode = ALWAYS，因此升级/死亡暂停时仍能接收输入。
 
-enum State { MENU, PLAYING, LEVEL_UP, GAME_OVER }
+## PAUSED 放末尾而不是插在 PLAYING 后面：前四个值会被 _publish_web_state 序列化给
+## shell（数字直接写进 JSON），改序号会让前端那套"加载中 / 已暂停"判断错位。
+## CONFIRM / SHOP 同属"整棵树冻结、HUD 面板可点"，靠状态名区分弹的是哪一块。
+enum State { MENU, PLAYING, LEVEL_UP, GAME_OVER, PAUSED, CONFIRM, SHOP }
 
 ## 前期节奏：前 GRACE_TIME 秒维持最轻压力，再在 RAMP_TIME 秒内平滑升到最重。
 ## 所有难度数值都从 _pressure() 取，改曲线只需要动这两个常量。
@@ -16,11 +19,12 @@ const RAMP_TIME: float = 150.0
 const SPAWN_MARGIN: float = 1.06
 const SPAWN_RING_SPREAD: float = 0.3
 const DESPAWN_DISTANCE: float = 1600.0
-const MAX_ENEMIES: int = 420
+const MAX_ENEMIES: int = 180
 ## 触屏设备的敌人上限。手机上是单线程 WebGL（没有 SharedArrayBuffer），
-## 420 只时自绘指令 + 每帧分离计算会把帧率压到 30 以下；
-## 210 只的围困观感几乎一样，但绘制与查询开销正好减半。
-const MOBILE_MAX_ENEMIES: int = 210
+## 420 只时自绘指令 + 每帧分离计算会把帧率压到 30 以下。
+## 桌面上限已经收到 180，"少而硬"之后手机端 110 只的观感几乎一样，
+## 绘制与查询开销正好再减一半。
+const MOBILE_MAX_ENEMIES: int = 110
 
 ## 菜单底色。章节会改清屏色（_apply_stage_look），回菜单时必须换回这个值，
 ## 否则菜单会带着上一局的章节色调，和菜单自己的压暗层叠出一层脏色。
@@ -48,21 +52,58 @@ const ZONE_TICK: float = 0.5
 ## 桌面版仍用 1280×720，一行都不改。
 const MOBILE_VIEWPORT: Vector2i = Vector2i(960, 540)
 
-## 刷怪间隔：0 = 最轻，1 = 最密
-const SPAWN_INTERVAL_EASY: float = 0.7
-const SPAWN_INTERVAL_HARD: float = 0.28
-## 每过这么多秒，每波多刷一只
-const WAVE_GROWTH_SECONDS: float = 35.0
+## 刷怪间隔：0 = 最轻，1 = 最密。
+## 元气骑士式的地图是"房间里有几只值得打的怪"，不是"走廊里淌着一条怪河"。
+## 间隔从 0.7/0.28 拉到 0.95/0.46，单波产出直接减半。
+const SPAWN_INTERVAL_EASY: float = 0.95
+const SPAWN_INTERVAL_HARD: float = 0.46
+## 每过这么多秒，每波多刷一只。
+## 35 → 55：晚期一波从 11 只降到 8 只，配合下面的预算收缩，场上总量减半。
+const WAVE_GROWTH_SECONDS: float = 55.0
+## 新章前 Stage.INTRO_TIME 秒的刷怪密度，从 0.5 线性回到 1.0。
+## INTRO_TIME 以前只管"出什么"（前 15 秒只出小兵），不管"出多少"：
+## 实测早死的 6 局，掉血全发生在新章开头 30 秒——Boss 战刚打完、技能和破甲弹都空着，
+## 密度却已经按 elapsed 拉满（晚期一波 10 只以上）。这一条补的就是那个缺口。
+const STAGE_INTRO_SPAWN_MIN: float = 0.5
 ## 场上同时存在的敌人上限 = BUDGET_BASE + 存活秒数 / BUDGET_STEP。
 ## 没有这道闸门时，刷怪速度（每秒数只）远超单目标清怪速度，屏外会堆到几百只。
-const BUDGET_BASE: int = 12
-const BUDGET_STEP: float = 4.0
-const ENEMY_HP_BASE: float = 8.0
+##
+## 12 / 4.0 → 9 / 5.5：这是"少而硬"这条线的第一半（另一半是下面的血量）。
+## 390 秒时的上限从 109 掉到 79，场上实际数量从 90 上下掉到 55 上下——
+## 一张 9 房间的图，平均每房间 6 只，接近元气骑士一个普通房间的量级。
+##
+## 第一版收到 8 / 7.0（390s 上限 63）时，10 局中位从 262s 掉到 124s：
+## 怪少了一半，经验也少了一半，玩家升级变慢、卡变少、DPS 更低——
+## 数量本身成了负循环。所以数量只减 27%，缺的经验由 xp_value 补齐（见 Enemy.configure）。
+const BUDGET_BASE: int = 9
+const BUDGET_STEP: float = 5.5
+
+## 视野内敌人上限。与上面的全场预算分开：预算是"屏外可以排队多少"，
+## 这条是"画面里同时最多几只"。玩家对看不见的东西没有压力感，
+## 屏外堆 80 只只会让台架数据好看、手感没有任何变化。
+## 20 是"围得上但还能走出去"的量级；9 房间的图里一个房间 4~6 只，
+## 同时挤进视野说明玩家已经停在走廊里被前后夹了。
+const VISIBLE_ENEMY_CAP: int = 20
+## Boss 战单独收紧到 10。Boss 的攻防循环本身就要占掉全部注意力，
+## 再加十几只小弟就不是"读招"，是"被推着走"。
+const BOSS_FIGHT_ENEMY_CAP: int = 10
+## 超额驱逐的检查间隔。每帧遍历 80 只敌人毫无必要，0.25 秒足够——
+## 怪从视野边缘走进来的速度约 100px/s，0.25 秒只移动 25px。
+const VISIBLE_CAP_TICK: float = 0.25
+## 屏外允许排队的数量。不设这条的话，全场上限仍是 79，屏外会一直堆着
+## 五十多只等着往视野里挤，驱逐逻辑每 0.25 秒就要推一次，边缘看起来像在抖。
+## 留 14 只缓冲：足够补位，又不至于让"推回去"变成常态。
+const ENEMY_OVERFLOW_ALLOWANCE: int = 14
+const ENEMY_HP_BASE: float = 9.0
 ## 敌人血量 = BASE + 线性项 + 二次项。纯线性追不上后期的卡牌成长：
 ## 实测 300 秒时玩家 19 张卡、血量还剩 161/274，等于后期没有威胁。
-## 二次项只在 150 秒后明显起作用（100 秒时只多 5 点血），不会反过来压死前中期。
-const ENEMY_HP_GROWTH: float = 0.16
-const ENEMY_HP_QUADRATIC: float = 0.0005
+## 二次项只在 150 秒后明显起作用（100 秒时只多 3 点血），不会反过来压死前中期。
+##
+## BASE 只给 11 而不是 16：16 是"血量翻倍"的第一版，实测开局三分钟内
+## 9/10 局直接死（战士中位 124s），因为玩家开局 DPS 是固定的，每只怪多花一下
+## 就等于被多围一秒。后期靠线性/二次项补，不用靠 BASE 补。
+const ENEMY_HP_GROWTH: float = 0.30
+const ENEMY_HP_QUADRATIC: float = 0.0009
 const ENEMY_SPEED_MIN: float = 62.0
 const ENEMY_SPEED_MAX: float = 94.0
 const ENEMY_SPEED_GROWTH: float = 0.35
@@ -87,8 +128,40 @@ const THREAT_RAMP: float = 150.0
 const THREAT_SPEED_BONUS: float = 28.0
 const THREAT_SPITTER_BONUS: float = 0.20
 const THREAT_SPECIAL_CAP: float = 0.70
+## 精英是**收益**不是惩罚：xp_value 6（普通 2）、血量只 ×2.4，而且 tier > 0 击杀还额外补
+## 一枚破甲弹。实测把它从 45/0.12 提到 30/0.15，10 局中位反而 280.6 → 310.1、通关 4/10 → 5/10。
+## 想靠精英加难度只能动血量倍率（Enemy.configure 里的 2.4）或接触伤害，别动出现时间/概率。
 const ELITE_START_TIME: float = 45.0
 const ELITE_CHANCE: float = 0.12
+
+## 每穿过一道传送门，下一张图的普通怪全部属性 ×1.10（累乘，不是加法）。
+## 为什么是累乘：玩家过一关拿一张卡 + 回一部分血，成长是乘法级的（卡牌叠乘），
+## 敌人用加法会被越甩越远——这正是旧版"越后期越宽裕"的根因。
+## 10% 这个数不是拍的：三张图之后 1.33，五张图之后 1.61，刚好和玩家一轮成型
+## （约 5~6 张核心卡）的强度同步；再高会变成"过两关就必死"。
+## 只作用于普通怪（含精英）与它们的伤害，不作用于 Boss：
+## Boss 血量 = 破甲弹发数 × 固定 40，随难度乘会直接破坏"捡几发打几下"的配平，
+## Boss 的成长走 Stage 表自己的 hp_scale / breach_shots 曲线。
+const FLOOR_POWER_STEP: float = 1.10
+## 速度单独封顶。1.10^N 一路乘下去，第 6 张图怪速就超过玩家，风筝流直接失效；
+## 更糟的是"跑不掉"不是难度，是判死刑。所以速度只吃前 5 层的加成，停在 1.5×。
+const FLOOR_SPEED_CAP: float = 1.5
+
+## 商人三件货。价格按"一张图的收入"定：
+## 一张图约 250 击杀（普通 2 金）+ 一个 Boss（40）= 540 金左右。
+## 回血 160 = 大约前 80 秒的全部收入，是这一排里最贵的一件——
+## 它换的是"再撑一段"，而卡和弹换的是"打得更快"，前者本来就该更贵。
+## 破甲弹 60 最便宜：它是 Boss 战的入场券，不该让玩家因为穷而卡关。
+const SHOP_HEAL_RATIO: float = 0.40
+const SHOP_HEAL_PRICE: int = 160
+const SHOP_BREACH_PRICE: int = 60
+const SHOP_CARD_PRICE: int = 120
+
+## Boss 战期间破甲弹掉落的加速倍率（乘在 breach_every 上）。
+## 不加这一条会出人命：Boss 站着不动等你打，玩家手上没弹又等不到掉落，
+## 只能干看着血条——那不是难度，是卡关。0.6 让 Boss 战里的掉率明显高于平时，
+## 但还没高到"站桩捡弹就能磨死它"——弹要边躲边捡。
+const BREACH_BOSS_FIGHT_SCALE: float = 0.6
 
 ## 特殊敌人的构成改由 Stage 提供（每章一张权重表），这里只保留共用参数。
 ## 权重按时间分批放开的历史原因还记得：开局 30 秒内只有普通敌人，先让玩家熟悉基本循环。
@@ -112,10 +185,21 @@ const BOSS_SHOT_DAMAGE: float = 9.0
 ## 高于 3.0 玩家只要不绕大圈就永远躲不开。
 const BOSS_HOMING_SPEED: float = 112.0
 const BOSS_HOMING_TURN: float = 2.2
+## 裂地单处伤害。一处 16 ≈ 玩家满血的 9%~16%，五处全中依然必死——
+## 它的定位是"站桩的惩罚"而不是磨血：能躲开的人完全无伤，不躲的人 5 秒内会被抬走。
+## 20 → 16 是因为 Boss 战整体变长了（窗口机制让一场从 9 秒变成 25~40 秒），
+## 单发不降的话"总伤害预算"会翻三倍，脆皮职业连第一只都过不去。
+const BOSS_STRIKE_DAMAGE: float = 16.0
 const BOSS_HOMING_DAMAGE: float = 11.0
 ## 击杀掉落：把原来的一颗大宝石拆成一圈小宝石。
 ## 总经验基本不变（8 颗 × 6 = 48 vs 45），但"打完炸出一地经验"是胜利的实感。
 const BOSS_GEM_COUNT: int = 8
+## Boss 入场时把场上普通怪压到这个数，之后全程只减不增。
+## 不压的话，晚期一场 Boss 战里玩家其实是在跟 60~100 只小怪周旋，Boss 反倒成了背景板
+## ——10 局实测里 7 局的死法都是"打完 Boss 血已见底、撞上下一章密集段"。
+## 8 是"召唤 4 只 + 一轮连招"的场地容量：和战前压力持平，但不叠加。
+## 设成 999 等于关掉这条退场逻辑。
+const BOSS_ARENA_CAP: int = 8
 ## 击杀后的喘息窗口：不刷怪，让玩家安心捡一地的宝石
 const BOSS_GRACE_TIME: float = 3.0
 ## 击杀回血比例。Boss 战本身就是一场资源消耗，不给回血的话下一个 Boss 必然接不住。
@@ -136,9 +220,10 @@ const FIRST_CARD_LEVEL: int = 2
 const CARD_GAP: int = 2
 ## 经验需求每级放大系数。1.22 太大：等级越升越慢的同时卡还越来越少，双重惩罚。
 const XP_GROWTH: float = 1.18
-## 每次升级回复的生命比例。没有这个，伤害就是"不可逆"的：血只会一路掉到 0，
-## 走位再好也只是把死亡时间往后推——试玩反馈里"下一级血不够"说的正是这件事。
-const LEVEL_HEAL_RATIO: float = 0.06
+## 升级**不再回血**。原来的 6% 让"刷经验"同时是续航手段，等于把"缺血"这件事
+## 从游戏里删掉了：只要还在升级，血线就自己回来，商人和回血道具都没有存在意义。
+## 现在回血只有四个来源：脱战自然回复、Boss 战后 15%、通关补满、商人。
+const GOLD_BASE_KILL: int = 2
 
 ## 升级卡数据表。unit：flat 固定值 / pct 百分比 / count 整数层数 / unlock 解锁
 const CARDS: Array[Dictionary] = [
@@ -182,7 +267,18 @@ var _hud_timer: float = 0.0
 var world: Node2D
 
 var _enemies: Array[Enemy] = []
+## 本局的下一个敌人序号。每局归零，保证同一局内"序号 → 生成顺序"完全可复现。
+var _next_serial: int = 0
 var _gems: Array[XpGem] = []
+## 地上还没被捡走的破甲弹
+var _items: Array[ItemModule] = []
+## 手上还有几发破甲弹。**只在打 Boss 时消耗**，所以它是一局里唯一的"Boss 输出预算"
+var _breach: int = 0
+## 本局金币。跨图保留、跨局归零：它是"这一局的经营成果"，
+## 换图清零等于逼玩家每张图都攒到刚好花完，那不叫经营，叫算术题。
+var _gold: int = 0
+## 距离下一次掉落攒了多久。平时攒着、等击杀时一起兑现，Boss 战里直接按时间掉
+var _breach_timer: float = 0.0
 ## 当前在场的 Boss（null 表示没有 Boss 战）。HUD 血条与危险底噪都读它
 var _boss: Enemy = null
 var _boss_kills: int = 0
@@ -204,6 +300,38 @@ var _sparks: HitSparks = null
 ## 缩圈。挂在 world 下，z_index = -1，画在所有游戏物体之下、背景网格之上。
 ## 它只回答三件事：圈在哪、多大、圈外掉多少血；怎么用（伤害结算、刷怪夹紧）都在 Game 里。
 var zone: Zone = null
+
+## 迷宫地图。挂在 world 下，z_index = -1，画在所有游戏物体之下。
+## 去毒圈后由它承担边界：只回答「哪里能走、怎么绕」，不再有圈外伤害这一层结算。
+## zone 变量暂时留着（恒为 null），旧台架读它会自动走「没有圈」的分支，P4 再清理。
+var maze: MazeMap = null
+
+## 第几张地图。三个传送门每次换图 +1，HUD 与结算面板都读它。
+var _map_index: int = 0
+## 已经穿过几道传送门。难度乘数 = FLOOR_POWER_STEP ^ _floor。
+## 和 _map_index 分开记：_map_index 是"玩家看到第几张图"（含第一张，从 0 起），
+## _floor 是"被放大过几次"（第一张图是 0 次）。两者数值恰好相同但语义不同，
+## 将来加"回退一层"之类的机制时，只有 _floor 该动。
+var _floor: int = 0
+## Boss 已死、四扇门已开、等玩家选门的这段"间隙"。
+## 它必须独立成一个标记，不能靠 _boss == null 判断：_boss 在战斗间隙也常是 null。
+## 这个状态下停刷、停 Boss 检查、也不推进章节时钟——玩家可以慢慢挑门。
+var _awaiting_portal: bool = false
+## 场上活着的传送门。换图时统一 free，否则上一张图的门会跟着留在世界里。
+var _portals: Array[Portal] = []
+## 玩家踩上去、正在等确认的那扇门。null 表示当前没有待确认的门。
+var _pending_portal: Portal = null
+## 本图的商人。换图时旧的要显式 free：_rebuild_map 只清敌人/宝石/道具/地图，
+## 商人不在那几张表里，不点名清就会跟着进下一张图。
+var _merchant: Merchant = null
+## 商人货架。每张图重置一次 bought 标记——同一个商人不会让你买两次，
+## 但下一个迷宫里的商人有全新的库存。
+var _shop_stock: Array[Dictionary] = []
+
+## 音效总控。跨局复用：换角色、重开一局都不重建，否则每局要重新加载 14 个流。
+var audio: GameAudio = null
+## 新手引导提示条。同样跨局复用——"看过哪些"记在它自己身上。
+var tutorial: TutorialHint = null
 var _zone_dmg_timer: float = 0.0
 ## 每帧重建的空间网格，只服务敌人分离
 var _grid: EnemyGrid = EnemyGrid.new()
@@ -222,6 +350,9 @@ var _xp: int = 0
 var _xp_total: int = 0
 var _xp_need: int = 6
 var _spawn_timer: float = 0.25
+## 视野上限的检查计时器。与 _spawn_timer 分开：刷怪是节奏，驱逐是兜底，
+## 两者同相会变成"刚刷完就清一轮"的固定抖动。
+var _cap_timer: float = 0.0
 ## 待发奖的强化卡数量（一次升级可能连跨多级，但只有到了阈值才发卡）
 var _pending_cards: int = 0
 ## 下一张卡要到几级才发
@@ -261,7 +392,9 @@ func _ready() -> void:
 	world.name = "World"
 	world.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(world)
+	_build_audio()
 	_build_hud()
+	_build_tutorial()
 	_build_touch()
 	_build_menu()
 	_open_menu()
@@ -355,14 +488,33 @@ func _publish_web_state() -> void:
 	})
 
 
+func _build_audio() -> void:
+	audio = GameAudio.new()
+	audio.name = "Audio"
+	add_child(audio)
+
+
 func _build_hud() -> void:
 	hud = GameHud.new()
 	add_child(hud)
+	hud.audio = audio
 	hud.card_chosen.connect(_choose)
 	hud.set_touch_mode(_touch_mode)
 	# 手机上按不到 R / P，结算面板给两个按钮；键盘路径同时保留
 	hud.restart_requested.connect(_restart)
 	hud.menu_requested.connect(_open_menu)
+	# 暂停键与暂停面板里的"继续"共用同一条信号：语义是"切换"，不是"暂停"。
+	hud.pause_toggled.connect(_on_pause_toggled)
+	hud.portal_confirmed.connect(_confirm_portal)
+	hud.portal_cancelled.connect(_cancel_portal)
+	hud.shop_buy.connect(_on_shop_buy)
+	hud.shop_closed.connect(_close_shop)
+
+
+func _build_tutorial() -> void:
+	tutorial = TutorialHint.new()
+	tutorial.name = "Tutorial"
+	add_child(tutorial)
 
 
 func _build_touch() -> void:
@@ -374,6 +526,9 @@ func _build_touch() -> void:
 func _build_menu() -> void:
 	start_menu = StartMenu.new()
 	add_child(start_menu)
+	start_menu.audio = audio
+	# 每次回菜单都要刷新一次静音文案：玩家可能在结算页之外用别的方式改过状态
+	start_menu._refresh_mute_text()
 	start_menu.started.connect(_on_menu_started)
 
 
@@ -387,6 +542,8 @@ func _open_menu() -> void:
 	hud.clear_overlays()
 	hud.set_danger(0.0)
 	hud.set_hud_visible(false)
+	if tutorial != null:
+		tutorial.flush()
 	start_menu.open(ScoreBoard.last_player(), ScoreBoard.list_players(), _last_hero, _touch_mode)
 
 
@@ -403,6 +560,16 @@ func _begin_run() -> void:
 	_clear_world()
 	_enemies.clear()
 	_gems.clear()
+	_items.clear()
+	_next_serial = 0
+	_breach = 0
+	_breach_timer = 0.0
+	_gold = 0
+	_pending_portal = null
+	_cap_timer = 0.0
+	if hud != null:
+		hud.set_breach(0)
+		hud.set_gold(0)
 
 	_elapsed = 0.0
 	_death_cause = "敌人"
@@ -419,6 +586,9 @@ func _begin_run() -> void:
 	_boss = null
 	_boss_kills = 0
 	_boss_grace = 0.0
+	_awaiting_portal = false
+	_portals.clear()
+	_floor = 0
 	_stage_index = 0
 	_stage_time = 0.0
 	_cleared = false
@@ -433,13 +603,18 @@ func _begin_run() -> void:
 		_sparks.max_particles = HitSparks.MOBILE_MAX_PARTICLES
 	world.add_child(_sparks)
 	_spawn_player()
-	# 缩圈在玩家之后建：它要读 _view_radius()，也就是当前视口与相机缩放，
-	# 而那两样都在 _spawn_player 里落定（触屏设备还会改 content_scale_size）。
-	zone = Zone.new()
-	zone.name = "Zone"
-	world.add_child(zone)
-	zone.reset(_view_radius(), randi())
-	_zone_dmg_timer = 0.0
+	# 迷宫在玩家之后建，建完把玩家放到起点房间中心。
+	# 墙是数据不是物理体，玩家/敌人各自在位移末尾夹紧（见 Player._move / Enemy._move_toward）。
+	maze = MazeMap.new()
+	maze.name = "MazeMap"
+	world.add_child(maze)
+	maze.build(randi())
+	player.global_position = maze.start_pos()
+	player.reset_physics_interpolation()
+	player.maze = maze
+	maze.rebuild_flow(maze.start_pos())
+	_spawn_merchant()
+	_map_index = 0
 	_state = State.PLAYING
 	# 走 _sync_pause 而不是直接 false：竖屏/切后台时开局或选完卡都必须保持冻结
 	# （正常点不到按钮，但 bot 与自检会直接调），否则玩家回来已经挨了两秒打
@@ -450,6 +625,14 @@ func _begin_run() -> void:
 	_apply_stage_look(Stage.at(_stage_index))
 	hud.show_banner(Stage.title(_stage_index), str(Stage.at(_stage_index)["subtitle"]), Stage.tint(_stage_index), false)
 	_update_hud()
+	if tutorial != null:
+		# 清掉上一局没播完的队列，但保留"看过什么"——
+		# 这正是"第二次进来不再啰嗦"的落点。
+		tutorial.reset_session()
+		tutorial.notify("move",
+			"WASD / 方向键 移动 · 攻击是自动的，专心走位就行",
+			"左侧拖动 移动 · 攻击是自动的，专心走位就行",
+			3.2, 1.6)
 
 
 func _clear_world() -> void:
@@ -469,6 +652,15 @@ func _spawn_player() -> void:
 	player.health_changed.connect(hud.set_health)
 	player.mana_changed.connect(hud.set_mana)
 	player.died.connect(_on_player_died)
+	player.audio = audio
+	player.mana_changed.connect(_on_mana_changed)
+	# 自动攻击的音效只给"低频动作"：近战 1.6 次/秒、回旋镖 1 次/秒左右。
+	# 子弹是 5 发/秒，逐发配音会变成一段单调的噪声墙，所以射手不配发射音——
+	# 它的反馈来自命中音（hit），那才是玩家真正在意的"打到了没有"。
+	if player.melee_weapon != null:
+		player.melee_weapon.swung.connect(_play_swing)
+	if player.boomerang_weapon != null:
+		player.boomerang_weapon.thrown.connect(_play_swing)
 	if touch != null:
 		touch.set_hero(_hero)
 		player.mana_changed.connect(touch.on_mana_changed)
@@ -478,12 +670,26 @@ func _spawn_player() -> void:
 	hud.set_mana(player.mana, player.max_mana)
 
 
+## 蓝满只在"第一次"值得提示：之后玩家已经知道技能键在哪，
+## 再提就是噪音。去重由 TutorialHint 内部的 _seen 负责，这里可以放心每帧触发。
+func _on_mana_changed(current: float, maximum: float) -> void:
+	if tutorial == null or maximum <= 0.0:
+		return
+	if current >= maximum - 0.01:
+		tutorial.notify("skill", "蓝条满了 · 空格 释放技能", "蓝条满了 · 点右下角按钮释放技能", 2.8)
+
+
+func _play_swing() -> void:
+	if audio != null:
+		audio.play("shoot")
+
+
 func _physics_process(delta: float) -> void:
 	if _state != State.PLAYING:
 		return
 
 	_elapsed += delta
-	_tick_zone(delta)
+	_tick_maze(delta)
 	if _boss_grace > 0.0:
 		_boss_grace = maxf(_boss_grace - delta, 0.0)
 	if _boss == null or not is_instance_valid(_boss):
@@ -495,12 +701,17 @@ func _physics_process(delta: float) -> void:
 		_spawn_timer = lerpf(SPAWN_INTERVAL_EASY, SPAWN_INTERVAL_HARD, _pressure())
 		_spawn_wave()
 	_cull_far_enemies()
+	_tick_visible_cap(delta)
 	_grid_rebuild()
 	_apply_separation()
 	_cull_far_gems()
-	# Boss 血条每帧推：走 HUD 的 10Hz 节流会明显看出条是"一跳一跳"掉下去的
+	_tick_breach(delta)
+	# Boss 血条每帧推：走 HUD 的 10Hz 节流会明显看出条是"一跳一跳"掉下去的。
+	# 状态字（攻击中 / 破甲 2.4s）也一起每帧推——窗口只开 3.8 秒，
+	# 晚 0.1 秒显示就等于少打一下；HUD 内部对"没变化"的情况是零开销的。
 	if _boss != null and is_instance_valid(_boss):
 		hud.set_boss_health(_boss.health_ratio())
+		hud.set_boss_state(_boss.boss_state_text(), _boss.is_vulnerable())
 	# 章节开场发的卡等横幅读完再弹（_advance_stage 会写 _card_delay）
 	if _pending_cards > 0 and _card_delay <= 0.0:
 		_open_level_up()
@@ -529,7 +740,25 @@ func _spawn_wave() -> void:
 	# Boss 刚死的几秒内不刷怪：玩家要捡一地宝石、喝一口血，这时再冒怪等于把奖励吃掉
 	if _boss_grace > 0.0:
 		return
+	# Boss 在场期间**完全停刷**。Boss 战的设计是"读招 + 抓破甲窗口"，
+	# 场上再叠一层小怪，玩家就只能在两头之间来回，哪边都做不好——
+	# 实测那 7 局的死法全是这样堆出来的。
+	# 停刷不会饿死破甲弹：_tick_breach 是独立计时，Boss 在场时直接把弹掉在玩家周围 180 处。
+	if _boss != null and is_instance_valid(_boss):
+		return
+	# 等玩家挑门的这段也不刷：四扇门是"打完收工、慢慢选"的节拍，
+	# 脚下还在刷怪，那个节拍就变成了"一边挨打一边选"。
+	if _awaiting_portal:
+		return
+	# 视野内已经到顶就先攒着：屏外预算还有空位也没用，
+	# 再多刷只会立刻被 _tick_visible_cap 推回去，白跑一趟随机数。
+	if _visible_enemy_count() >= _visible_cap():
+		return
 	var count: int = 1 + int(_elapsed / WAVE_GROWTH_SECONDS)
+	# 新章开场压密度：每波只出 count × 密度，至少 1 只（0 只会让"开局 15 秒没有怪"，
+	# 那不是缓冲，是空转）。round 而不是 int：晚期 6 只 × 0.75 该给 4.5 → 5，
+	# 直接截断会一直是 4，斜坡的手感会变成阶梯。
+	count = maxi(1, int(round(float(count) * _spawn_density())))
 	var budget: int = _enemy_budget()
 	for i in range(count):
 		if _enemies.size() >= budget:
@@ -537,16 +766,149 @@ func _spawn_wave() -> void:
 		_spawn_enemy()
 
 
-## 场上敌人数量的天花板，随存活时间缓慢放开
+## 场上敌人数量的天花板，随存活时间缓慢放开。
+## 注意这是**全场**预算（含屏外排队），视野内的上限由 _visible_cap() 单独管：
+## 两条分开，屏外才有"下一批"可换，视野内又不会一次涌进来十几只。
 func _enemy_budget() -> int:
-	return mini(BUDGET_BASE + int(_elapsed / BUDGET_STEP), _max_enemies)
+	var curve: int = BUDGET_BASE + int(_elapsed / BUDGET_STEP)
+	# 第三条闸门：全场 = 视野上限 + 少量屏外缓冲。
+	# 前两条（时间曲线 / 设备上限）允许屏外堆 60 只，而视野内只放 20 只，
+	# 结果是"驱逐"每拍都在跑、边缘的怪反复被弹回去。加上这一条之后，
+	# 排队长度和视野容量是同一个量级，怪被推开一次就能安静等下一轮。
+	return mini(mini(curve, _max_enemies), _visible_cap() + ENEMY_OVERFLOW_ALLOWANCE)
+
+
+## 视野内允许的敌人数。Boss 在场时收紧到 10。
+func _visible_cap() -> int:
+	if _boss != null and is_instance_valid(_boss):
+		return BOSS_FIGHT_ENEMY_CAP
+	return VISIBLE_ENEMY_CAP
+
+
+## 视口的半宽/半高（世界坐标）。用矩形而不是圆形：
+## 圆形近似等于把四个角也算进"视野"，会让上限虚高 27%，
+## 而玩家真正看见的就是这块矩形。
+func _view_half() -> Vector2:
+	var half: Vector2 = get_viewport_rect().size / (2.0 * Player.CAMERA_ZOOM)
+	return Vector2(maxf(half.x, 1.0), maxf(half.y, 1.0))
+
+
+## 1.06 是边缘余量：刚好压在屏幕边界上的那只已经算"看见了"，
+## 判活判死用一个阈值，不然会出现"看着它在屏幕里但计数没涨"。
+func _in_view(p: Vector2) -> bool:
+	if not is_instance_valid(player):
+		return false
+	var d: Vector2 = (p - player.global_position).abs()
+	var half: Vector2 = _view_half() * 1.06
+	return d.x <= half.x and d.y <= half.y
+
+
+## 视野内非 Boss 敌人数量。Boss 自己不算：它是场地的中心，
+## 把它算进去会让"10 只小弟"变成"9 只"，数字对不上玩家的直觉。
+func _visible_enemy_count() -> int:
+	if not is_instance_valid(player):
+		return 0
+	var n: int = 0
+	for e in _enemies:
+		if not is_instance_valid(e) or e.kind == Enemy.Kind.BOSS:
+			continue
+		if _in_view(e.global_position):
+			n += 1
+	return n
+
+
+## 视野超额驱逐。
+##
+## 为什么是"推回屏外"而不是"删掉"：删掉会让怪在玩家眼前凭空消失，
+## 而且不给经验——玩家会觉得"我明明看见一只，怎么没了"。
+## 推回屏外只是让它晚几秒再走进来，视觉上完全说得通（它在往这边走）。
+## 只推最远的那几只：近身怪突然后跳比消失还假，而近身怪多到超过 20 的情况
+## 本身说明玩家已经被围死，那时候该发生的是死亡，不是清场。
+func _tick_visible_cap(delta: float) -> void:
+	if not is_instance_valid(player):
+		return
+	_cap_timer -= delta
+	if _cap_timer > 0.0:
+		return
+	_cap_timer = VISIBLE_CAP_TICK
+	var cap: int = _visible_cap()
+	var inside: Array[Enemy] = []
+	for e in _enemies:
+		if not is_instance_valid(e) or e.kind == Enemy.Kind.BOSS:
+			continue
+		if _in_view(e.global_position):
+			inside.append(e)
+	if inside.size() <= cap:
+		return
+	inside.sort_custom(_farther_first)
+	for i in range(inside.size() - cap):
+		_push_out_of_view(inside[i])
+
+
+## 远的排前面：sort_custom 升序，所以"距离大的先被处理"。
+## 写成成员函数而不是 lambda——lambda 里带换行的长表达式在 GDScript 里
+## 没有续行符，一行写不下就只能拆，反而更难读。
+func _farther_first(a: Enemy, b: Enemy) -> bool:
+	# 不写反斜杠续行：GDScript 不支持，写一次语法检查就报一次
+	var da: float = a.global_position.distance_squared_to(player.global_position)
+	var db: float = b.global_position.distance_squared_to(player.global_position)
+	return da > db
+
+
+## 沿"玩家 → 敌人"的方向把它推到视口外 30%。
+## 落点要过一遍可走格：推到墙里会被 constrain 夹回来，等于没推。
+## 被夹回视野内时改用随机可走格；随机也找不到（极小地图）就放弃这一次，
+## 下一个 tick 再试——宁可短暂超编，也不能把怪瞬移到玩家脸上。
+func _push_out_of_view(enemy: Enemy) -> void:
+	var dir: Vector2 = enemy.global_position - player.global_position
+	if dir.length() < 1.0:
+		dir = Vector2.RIGHT
+	var half: Vector2 = _view_half()
+	var kx: float = half.x * 1.30 / maxf(absf(dir.x), 1.0)
+	var ky: float = half.y * 1.30 / maxf(absf(dir.y), 1.0)
+	var spot: Vector2 = player.global_position + dir * minf(kx, ky)
+	if maze != null:
+		spot = maze.nearest_floor_point(spot)
+		if _in_view(spot):
+			var far: Vector2 = maze.random_spawn_point(player.global_position,
+				_view_radius() * 1.4, _view_radius() * 2.2)
+			if _in_view(far):
+				return
+			spot = far
+	enemy.global_position = spot
+	enemy.reset_physics_interpolation()
+
+
+## 新章开场的密度系数：前 Stage.INTRO_TIME 秒从 STAGE_INTRO_SPAWN_MIN 线性回到 1。
+## 用 _stage_time 而不是 _elapsed——要缓冲的是"刚换章"这个时刻，
+## 不是每局的第一个 15 秒（开局本来就慢，压它没有意义）。
+## Boss 在场时 _stage_time 是冻住的，所以 Boss 战结束后它从 0 重新走一遍斜坡，
+## 正好接上"打完 Boss、技能和弹都空着"的那段。
+func _spawn_density() -> float:
+	if _stage_time >= Stage.INTRO_TIME:
+		return 1.0
+	return lerpf(STAGE_INTRO_SPAWN_MIN, 1.0, _stage_time / Stage.INTRO_TIME)
 
 
 func _spawn_enemy() -> void:
 	var big: bool = _elapsed > ELITE_START_TIME and randf() < ELITE_CHANCE
 	# 精英固定走普通行为，特殊行为只分给普通怪
 	var kind: int = Enemy.Kind.GRUNT if big else _roll_kind()
-	_create_enemy(kind, big, player.global_position + _spawn_offset(randf() * TAU))
+	# 迷宫里"视野外的环"大概率落在墙里，所以直接让地图挑一个远处的可走格。
+	# 无地图时（旧自检直接调 _spawn_enemy）保持原来的环形刷法。
+	var at: Vector2 = player.global_position + _spawn_offset(randf() * TAU)
+	if maze != null:
+		# 距离下限必须压过视野半径：480 在 1280×720 / zoom 1.35 下只有半宽 474，
+		# 斜向落点会直接落在矩形视野里，"刷在屏幕内"看起来像凭空冒出来。
+		# random_spawn_point 只有 40 次尝试，密集迷宫里可能挑不到，所以试几次取第一个视野外的；
+		# 实在挑不到就交给 _tick_visible_cap 下一拍推走，绝不把怪塞到玩家脸上。
+		var min_d: float = maxf(_view_radius() * 1.15, 300.0)
+		at = maze.random_spawn_point(player.global_position, min_d, 1400.0)
+		for i in range(5):
+			if not _in_view(at):
+				break
+			at = maze.random_spawn_point(player.global_position, min_d, 1400.0)
+	_create_enemy(kind, big, at)
 
 
 ## 造一只敌人并挂进 world。位置由调用方给：普通刷怪用视野外的环，
@@ -559,8 +921,15 @@ func _threat() -> float:
 	return clampf((_elapsed - THREAT_START) / THREAT_RAMP, 0.0, 1.0)
 
 
-func _create_enemy(kind: int, big: bool, at: Vector2) -> void:
-	at = _clamp_point_into_zone(at)
+## 当前图层（第几张图）的难度乘数。每穿过一道传送门 ×1.10，累乘。
+## 单独一个函数而不是散在 _create_enemy 里：吐息伤害、Boss 召唤物、自检脚本
+## 都要读同一个数，写两遍迟早对不上。
+func _power_scale() -> float:
+	return pow(FLOOR_POWER_STEP, float(_floor))
+
+
+func _create_enemy(kind: int, big: bool, at: Vector2, minion: bool = false) -> void:
+	at = _clamp_into_walkable(at)
 	var hp: float = ENEMY_HP_BASE + _elapsed * ENEMY_HP_GROWTH + _elapsed * _elapsed * ENEMY_HP_QUADRATIC
 	# 章节倍率乘在全局时间曲线之上：全局曲线负责"越拖越硬"，
 	# 章节倍率负责"越往下越硬"。两者分开，改一章的难度不会影响另一章。
@@ -574,24 +943,46 @@ func _create_enemy(kind: int, big: bool, at: Vector2) -> void:
 	else:
 		match kind:
 			Enemy.Kind.CHARGER:
-				# 平时略慢，威胁全在冲刺那一下
-				speed *= 0.92
+				# 冲锋者是"特定快怪"的第一只：平时就比小兵快 18%，冲刺 ×3.6。
+				# 旧值 0.92（略慢）让它只有冲刺那一下有存在感，数量减半后它就彻底
+				# 变成背景板了——现在它负责把玩家从走廊里撵出去。
+				speed *= 1.18
 			Enemy.Kind.SPITTER:
-				# 贫血 + 慢：让它"好杀但难躲"，玩家正确的应对是优先点掉它
+				# 贫血 + 慢：让它"好杀但难躲"，玩家正确的应对是优先点掉它。
+				# 远程怪不提速：它一旦跟得上近战，就没有任何安全的应对方式了。
 				hp *= 0.85
 				speed *= 0.8
 			Enemy.Kind.BOMBER:
+				# 自爆怪提速到 1.22：它要在玩家没反应过来之前贴上来才吓人，
+				# 但碰撞无伤 + 有引信，快不等于必中。
 				hp *= 0.7
-				speed *= 1.06
+				speed *= 1.22
+
+	# 楼层倍率放在所有身份修正之后：它是对"最终数值"的放大，
+	# 不是对基础值的放大——否则精英/自爆怪的相对关系会随层数漂移。
+	var power: float = _power_scale()
+	hp *= power
+	speed *= minf(power, FLOOR_SPEED_CAP)
 
 	var enemy := Enemy.new()
+	enemy.spawn_serial = _next_serial
+	_next_serial += 1
 	enemy.configure(hp, speed, big, kind)
+	enemy.minion = minion
+	enemy.power_scale = power
+	enemy.maze = maze
 	enemy.target = player
 	enemy.died.connect(_on_enemy_died)
 	enemy.hit.connect(_on_enemy_hit)
 	enemy.spit.connect(_on_enemy_spit)
 	world.add_child(enemy)
+	# 物理插值（project.godot 的 physics/common/physics_interpolation）会在
+	# "上一个 tick 的变换"和"这一个 tick 的变换"之间补帧。刚出生的节点上一个变换
+	# 是默认值（世界原点），不重置的话它会在屏幕上从原点滑到出生点——
+	# 实测 240Hz 下要滑 197 像素，也就是每只怪都从地图左上角飞出来。
+	# 凡是"设完位置就再也不会连续移动"的节点，设完必须重置一次。
 	enemy.global_position = at
+	enemy.reset_physics_interpolation()
 	_enemies.append(enemy)
 
 
@@ -606,6 +997,10 @@ func _check_boss() -> void:
 		return
 	if _boss != null and is_instance_valid(_boss):
 		return
+	# 门开着的时候不能刷下一只 Boss：这段时间章节时钟仍在走，
+	# 不挡的话玩家在门口挑十秒，就会凭空多出一只 Boss 站在门外。
+	if _awaiting_portal:
+		return
 	if _stage_time < float(Stage.at(_stage_index)["length"]):
 		return
 	_spawn_boss()
@@ -613,8 +1008,13 @@ func _check_boss() -> void:
 
 func _spawn_boss() -> void:
 	var stage: Dictionary = Stage.at(_stage_index)
-	var hp: float = (ENEMY_HP_BASE + _elapsed * ENEMY_HP_GROWTH + _elapsed * _elapsed * ENEMY_HP_QUADRATIC) \
-		* BOSS_HP_MULT * float(stage["hp_scale"])
+	# Boss 的生命不再是"随时间的血量公式 × 倍率"，而是 **发数 × 单发固定伤害**。
+	# 旧公式让它和小怪一起随 elapsed 膨胀，而玩家武器也在膨胀，两边互相抵消——
+	# 结果就是后期站着对拼、谁也不觉得危险（实测 4:44 已经 3585 杀、12 万分）。
+	# 改成"发数"之后，Boss 的血条等价于一张弹匣清单：
+	# 打得动打不动只取决于捡了几发，和卡片强度彻底解耦。
+	var shots: int = int(stage.get("breach_shots", 12))
+	var hp: float = Enemy.BREACH_HIT_DAMAGE * float(shots)
 	var speed: float = (randf_range(ENEMY_SPEED_MIN, ENEMY_SPEED_MAX) \
 		+ minf(_elapsed * ENEMY_SPEED_GROWTH, ENEMY_SPEED_CAP) + THREAT_SPEED_BONUS * _threat()) * BOSS_SPEED_SCALE
 	var boss_name: String = str(stage["boss"])
@@ -622,8 +1022,13 @@ func _spawn_boss() -> void:
 	# 玩家记住的是"潮主会拍浪"，而不是"第三章的 Boss 会什么"。
 	var kit: int = Stage.boss_kit(boss_name)
 	var boss := Enemy.new()
+	boss.spawn_serial = _next_serial
+	_next_serial += 1
 	boss.configure_boss(hp, speed, boss_name, kit)
 	boss.target = player
+	# 壳的判定注入给 Boss 自己：Game 不在每个武器的伤害路径上做判断，
+	# 只在"这一发弹还在不在"这一件事上说话。
+	boss.breach_gate = _consume_breach
 	# 出场定身：Boss 从视野外走进来的那 1.1 秒不出招，
 	# 玩家需要用这一秒确认"它来了、它叫什么、血条在哪"。
 	boss.boss_intro_t = Enemy.BOSS_INTRO_TIME
@@ -634,32 +1039,93 @@ func _spawn_boss() -> void:
 	boss.boss_phase.connect(_on_boss_phase)
 	boss.boss_blink.connect(_on_boss_blink)
 	boss.boss_homing.connect(_on_boss_homing)
+	boss.boss_strike.connect(_on_boss_strike)
+	# 破甲窗口的开/关必须"看得见听得见"：玩家在满屏弹幕里很难只靠血条换色发现
+	# "现在能打了"，所以这里再加一道火花 + 一记提示音。
+	boss.vulnerable_changed.connect(_on_boss_vulnerable)
+	boss.maze = maze
 	world.add_child(boss)
 	# 出现在普通刷怪环外侧 1.25 倍处：玩家看得见它从远处走进来，而不是凭空贴脸出现。
 	# 圈变小之后这个点会掉到毒里，所以同样要夹一次——Boss 不吃毒，但"从紫幕外走进来"
 	# 看着像逃课；夹在壁外侧 1.03R 处，它仍然从远处入画。
-	boss.global_position = _clamp_point_into_zone(player.global_position + _spawn_offset(randf() * TAU) * 1.25)
+	boss.global_position = _clamp_into_walkable(player.global_position + _spawn_offset(randf() * TAU) * 1.25)
+	boss.reset_physics_interpolation()
 	_enemies.append(boss)
 	_boss = boss
 	# 血条带风格名（潮主 · 潮汐）：三只 Boss 的招式不同，名字后面得跟上"它怎么打"
 	hud.show_boss(boss_name, Enemy.BOSS_KIT_NAMES[kit])
 	# 出场横幅只报"关底 + 它怎么威胁你"。同一时间换章横幅已经用掉了，
 	# 这里不写章节信息，只让玩家知道"接下来这一场是读招，不是拼血"。
+	if audio != null:
+		audio.play("boss_in")
+	if tutorial != null:
+		# 横幅已经说了"它是什么"，这里只补横幅没说、但必须知道的机制：
+		# 壳 + 窗口 + 回血。不知道"打不动"的玩家会以为游戏卡了；
+		# 不知道"只有窗口能打"的玩家会一直贴着它开枪，然后以为弹是坏的。
+		tutorial.notify("boss", "它有壳：出招时打不进 · 只在它破甲的几秒用破甲弹打", "", 3.6)
 	hud.show_banner("关底 · " + boss_name, Stage.boss_hint(boss_name), Stage.tint(_stage_index), false)
 	# 立刻刷一次 HUD：章节条要当场变成"关底"，
 	# 等 10Hz 的节流刷新会有最多 0.1 秒的延迟，玩家会先看到 Boss 出场再看到条变红
 	_update_hud()
 	if is_instance_valid(player):
 		player.add_trauma(0.4)
+	# 入场这一步是这次改动的关键：只停刷不处理已经站在场上的那 60~100 只，等于没改。
+	_thin_for_boss_fight()
+	# 刷怪计时也归位。不归位的话，停刷的几十秒里它一路跑负，
+	# Boss 一死就是"满编一波 + 一地宝石"同时砸下来。
+	_spawn_timer = lerpf(SPAWN_INTERVAL_EASY, SPAWN_INTERVAL_HARD, _pressure())
+
+
+## Boss 入场时把场上的普通怪压到 BOSS_ARENA_CAP 只。
+## 按离玩家由远到近移除：远处消失玩家看不见，近身那几只在眼前凭空蒸发才假。
+## 走静默移除而不是 take_damage——不给经验也不计击杀，
+## 否则 Boss 入场反倒成了刷经验的机会。
+func _thin_for_boss_fight() -> void:
+	var crowd: Array[Enemy] = []
+	for enemy in _enemies:
+		if is_instance_valid(enemy) and enemy.kind != Enemy.Kind.BOSS:
+			crowd.append(enemy)
+	if crowd.size() <= BOSS_ARENA_CAP:
+		return
+	var origin: Vector2 = player.global_position if is_instance_valid(player) else Vector2.ZERO
+	crowd.sort_custom(func(a, b) -> bool:
+		return a.global_position.distance_squared_to(origin) > b.global_position.distance_squared_to(origin)
+	)
+	for i in range(crowd.size() - BOSS_ARENA_CAP):
+		var enemy: Enemy = crowd[i]
+		_enemies.erase(enemy)
+		enemy.queue_free()
+
+
+## Boss 一死，它召唤出来的小弟跟着爆。走正常死亡路径：掉经验、计击杀。
+## "Boss 倒了但它的兵还围着"在观感上就是这一场没打完，
+## 而且 3 秒无敌 + 15% 回血撑得过 8 只残留，撑不过 16~32 只贴身。
+func _detonate_minions() -> void:
+	var doomed: Array[Enemy] = []
+	for enemy in _enemies:
+		if is_instance_valid(enemy) and enemy.minion:
+			doomed.append(enemy)
+	# 先收集再处理：take_damage 会同步触发 _on_enemy_died 从 _enemies 里 erase，
+	# 边遍历边删会漏掉后面的元素。
+	for enemy in doomed:
+		if is_instance_valid(enemy):
+			enemy.take_damage(1e9, true)
 
 
 ## Boss 召唤小怪：围着自己一圈生成，强迫玩家在"打 Boss"和"清小怪"之间取舍
 func _on_boss_summon(at: Vector2, count: int) -> void:
+	# Boss 战的 10 只上限在这里也要挡：召唤发生在 Boss 身边（离玩家 ≤150），
+	# 每一只都会当场进视野，不在这里算的话 _tick_visible_cap 会把刚召唤出来的
+	# 小弟推回屏外——玩家看到的是"Boss 一挥手，四只怪往外飞"，比不召唤还怪。
+	var room: int = _visible_cap() - _visible_enemy_count()
+	if room <= 0:
+		return
+	count = mini(count, room)
 	for i in range(count):
 		if _enemies.size() >= _max_enemies:
 			return
 		var angle: float = TAU * float(i) / float(maxi(count, 1))
-		_create_enemy(Enemy.Kind.GRUNT, false, at + Vector2(cos(angle), sin(angle)) * 78.0)
+		_create_enemy(Enemy.Kind.GRUNT, false, at + Vector2(cos(angle), sin(angle)) * 78.0, true)
 
 
 ## Boss 环形弹幕：从半径 60 处起步而不是圆心——圆心起步的话贴脸就是必中，
@@ -679,12 +1145,13 @@ func _on_boss_barrage(at: Vector2, count: int) -> void:
 		shot.color = Color(0.98, 0.46, 0.5)
 		world.add_child(shot)
 		shot.global_position = at + dir * 60.0
+		shot.reset_physics_interpolation()
 
 
 func _on_boss_phase(phase: int) -> void:
 	hud.set_boss_phase(phase)
 	if is_instance_valid(player):
-		player.add_trauma(0.5)
+		player.add_trauma(0.4)
 
 
 ## 蚀影瞬移：原地和落点各炸一团紫色火花。
@@ -696,7 +1163,7 @@ func _on_boss_blink(from: Vector2, to: Vector2) -> void:
 		_sparks.burst(from, tint, 14)
 		_sparks.burst(to, tint, 20)
 	if is_instance_valid(player):
-		player.add_trauma(0.3)
+		player.add_trauma(0.25)
 
 
 ## 深潜者追踪弹：扇形铺开而不是三发同向——同向的三发等于一发三倍伤害。
@@ -718,16 +1185,330 @@ func _on_boss_homing(at: Vector2, count: int) -> void:
 		shot.color = Color(0.95, 0.52, 0.86)
 		world.add_child(shot)
 		shot.global_position = at + dir * 48.0
+		shot.reset_physics_interpolation()
 
 
-func _on_boss_killed() -> void:
+## 裂地：在 Boss 算好的位置落一处预警圈。落点已经在 Player 附近，
+## 所以这里不做夹紧——地裂本来就该跟着人走，夹进安全区反而会让它"追不上"。
+func _on_boss_strike(at: Vector2, strike_radius: float) -> void:
+	var strike := BossStrike.new()
+	strike.target = player
+	strike.radius = strike_radius
+	strike.damage = BOSS_STRIKE_DAMAGE
+	strike.tint = Color(1.0, 0.52, 0.24) if _stage_index % 2 == 0 else Color(1.0, 0.42, 0.46)
+	strike.detonated.connect(_on_strike_detonated)
+	world.add_child(strike)
+	strike.global_position = at
+	# 和出生点同一条规则：设完位置立刻重置插值，否则它会从上一次的位置滑过来
+	strike.reset_physics_interpolation()
+
+
+func _on_strike_detonated(at: Vector2, strike_radius: float) -> void:
+	if _sparks != null:
+		_sparks.burst(at, Color(1.0, 0.62, 0.3), 10)
+	if is_instance_valid(player) and player.global_position.distance_to(at) <= strike_radius * 1.6:
+		player.add_trauma(0.18)
+	if audio != null:
+		audio.play("hit", 0.7)
+
+
+## 窗口开：金色火花 + 一记上行提示音；窗口关：什么都不做。
+## 关的时候不出声是刻意的——"打不动了"应该是熄火，而不是又一次报警，
+## 否则整场战斗会被提示音填满，真正重要的那一下反而听不出来。
+func _on_boss_vulnerable(active: bool) -> void:
+	if not active:
+		return
+	if _sparks != null and _boss != null and is_instance_valid(_boss):
+		_sparks.burst(_boss.global_position, Color(1.0, 0.84, 0.36), 22)
+	if audio != null:
+		audio.play("levelup", 1.25)
+
+
+func _on_boss_killed(at: Vector2) -> void:
 	_boss = null
+	if audio != null:
+		audio.play("boss_die")
 	hud.hide_boss()
 	_boss_grace = BOSS_GRACE_TIME
+	# 小弟先爆，再回血：这一帧结束时场上只剩 8 只以内的残留
+	_detonate_minions()
 	if is_instance_valid(player):
 		player.heal(player.max_health * BOSS_HEAL_RATIO)
-		player.add_trauma(0.7)
+		player.add_trauma(0.6)
+		# 无敌从"Boss 倒下的这一帧"开始算。这 3 秒玩家要做的是走过去捡宝石，
+		# 而不是一边躲残留一边捡——顺手捡的东西不该用命换。
+		player.grant_invuln(BOSS_GRACE_TIME)
+	_open_portals(at)
+
+
+## 四扇门开在 Boss 尸体周围，扇形铺开。
+## 位置全部过一遍"吸到最近可走格"：Boss 有可能死在走廊口或墙角，
+## 门落进墙里就等于这一局没有出口——这是必须防的死锁，不是美观问题。
+## 沿着 8 个方向逐个试，被墙吸回同一点就换下一个方向、再不行就扩半径：
+## 只按固定角度放一次的话，Boss 死在窄走廊里四扇门会全部叠在走廊中线上，
+## 玩家看到的是"一扇门"。
+func _open_portals(at: Vector2) -> void:
+	_awaiting_portal = true
+	# 停刷期间也不该再累积计时：否则玩家挑门挑了十秒，进门第一帧就是满编一波。
+	_spawn_timer = 0.0
+	var center: Vector2 = at
+	if maze != null:
+		center = maze.nearest_floor_point(at)
+	var rewards: Array[int] = [
+		Portal.Reward.CARD, Portal.Reward.CARD2,
+		Portal.Reward.BREACH, Portal.Reward.GOLD,
+	]
+	var slots: Array[Vector2] = []
+	var dir: int = 0
+	var radius: float = 130.0
+	while slots.size() < rewards.size() and dir < 24:
+		var angle: float = TAU * float(dir % 8) / 8.0 + (PI * 0.25) * float(dir / 8)
+		var probe: Vector2 = center + Vector2.RIGHT.rotated(angle) * radius
+		if maze != null:
+			probe = maze.nearest_floor_point(probe)
+		var free: bool = true
+		for taken in slots:
+			if taken.distance_to(probe) < 100.0:
+				free = false
+				break
+		if free:
+			slots.append(probe)
+		dir += 1
+		if dir % 8 == 0:
+			radius += 90.0
+	# 极端情况下（整张图只有一条 1 格宽走廊）位置凑不够：宁可贴着中心放，
+	# 也不能少一扇门——玩家会以为没开门，直接卡死在这一层。
+	while slots.size() < rewards.size():
+		slots.append(center + Vector2.RIGHT.rotated(
+			TAU * float(slots.size()) / float(rewards.size())) * 70.0)
+
+	for i in range(rewards.size()):
+		var portal := Portal.new()
+		portal.index = i
+		portal.reward = rewards[i]
+		portal.target = player
+		portal.request_enter.connect(_on_portal_requested)
+		world.add_child(portal)
+		portal.global_position = slots[i]
+		portal.reset_physics_interpolation()
+		_portals.append(portal)
+	# 横幅要说"现在该干什么"。只说"Boss 已击败"等于把玩家扔在原地。
+	if audio != null:
+		audio.play("clear")
+	hud.show_banner("四扇门已开", "走进任意一扇 · 每深入一张图，敌人全部属性 +10%",
+		Stage.tint(_stage_index), true)
+
+
+## 进门：发奖励 → 记一层难度 → 推章节 → 重建地图。
+## 顺序不能换：_advance_stage 会改 _stage_index，而 _rebuild_map 之后刷的怪
+## 必须吃到新章节的 hp_scale；反过来先重建地图，第一波怪还是旧章的数值。
+func _on_portal_requested(portal: Portal) -> void:
+	if not _awaiting_portal or _state != State.PLAYING:
+		return
+	_pending_portal = portal
+	_state = State.CONFIRM
+	var next_power: float = pow(FLOOR_POWER_STEP, float(_floor + 1))
+	hud.open_portal_confirm(portal.reward_text(), _map_index + 1,
+		int(round((next_power - 1.0) * 100.0)))
+	_sync_pause()
+
+
+func _confirm_portal() -> void:
+	var portal: Portal = _pending_portal
+	_pending_portal = null
+	if portal == null or not is_instance_valid(portal):
+		_close_portal_confirm()
+		return
+	var reward: int = portal.reward
+	hud.clear_overlays()
+	_state = State.PLAYING
+	_sync_pause()
+	_awaiting_portal = false
+	for p in _portals:
+		if is_instance_valid(p) and p != portal:
+			p.queue_free()
+	_portals.clear()
+	portal.consume()
+	_grant_portal_reward(reward)
+	_floor += 1
+	_map_index += 1
 	_advance_stage()
+	_rebuild_map()
+
+
+func _cancel_portal() -> void:
+	_close_portal_confirm()
+	if is_instance_valid(_pending_portal):
+		_pending_portal.cancel_pending()
+	_pending_portal = null
+
+
+func _close_portal_confirm() -> void:
+	hud.clear_overlays()
+	_state = State.PLAYING
+	_sync_pause()
+
+
+# ---------------------------------------------------------------- 商人与金币
+
+## 把商人放到本图的密室。位置由 MazeMap 算（离起点第二远的房间），
+## Game 只负责建节点——迷宫不该知道"商人"这种玩法概念。
+func _spawn_merchant() -> void:
+	if maze == null or not is_instance_valid(player):
+		return
+	var m := Merchant.new()
+	m.target = player
+	m.request_shop.connect(_on_merchant_request)
+	world.add_child(m)
+	m.global_position = maze.shop_room_pos()
+	m.reset_physics_interpolation()
+	_merchant = m
+	_shop_stock_reset()
+
+
+## 货架。每次进新图都重置：商人不是便利店，是"这张图的额外机会"。
+## 三个货位对应 Merchant._draw 里画的那三个小方块——视觉和逻辑对上，
+## 玩家看到柜台上摆着三样东西，面板里就是三行。
+func _shop_stock_reset() -> void:
+	_shop_stock.clear()
+	_shop_stock.append({
+		"id": "heal", "name": "治疗药剂",
+		"desc": "回复 40% 最大生命", "price": SHOP_HEAL_PRICE, "bought": false,
+	})
+	_shop_stock.append({
+		"id": "breach", "name": "破甲弹 ×3",
+		"desc": "打穿 Boss 的壳，只有它做得到", "price": SHOP_BREACH_PRICE, "bought": false,
+	})
+	_shop_stock.append({
+		"id": "card", "name": "战术手册",
+		"desc": "立刻拿到一张升级卡", "price": SHOP_CARD_PRICE, "bought": false,
+	})
+
+
+func _on_merchant_request(merchant: Merchant) -> void:
+	if _state != State.PLAYING:
+		return
+	_merchant = merchant
+	_state = State.SHOP
+	hud.open_shop(_gold, _shop_stock)
+	if audio != null:
+		audio.play("ui")
+	_sync_pause()
+
+
+## 买货。校验顺序是 状态 → 索引 → 是否已买 → 钱够不够：
+## 钱放最后，因为前三项是"面板状态过期"（比如连点两次），
+## 只有钱不够是玩家操作本身的问题，那一种才需要"什么都不发生"地拒绝。
+func _on_shop_buy(index: int) -> void:
+	if _state != State.SHOP:
+		return
+	if index < 0 or index >= _shop_stock.size():
+		return
+	var item: Dictionary = _shop_stock[index]
+	if bool(item["bought"]):
+		return
+	var price: int = int(item["price"])
+	if _gold < price:
+		return
+	_gold -= price
+	item["bought"] = true
+	_shop_stock[index] = item
+	match str(item["id"]):
+		"heal":
+			if is_instance_valid(player):
+				player.heal(player.max_health * SHOP_HEAL_RATIO)
+		"breach":
+			_breach += 3
+			if hud != null:
+				hud.set_breach(_breach)
+		"card":
+			_pending_cards += 1
+	if hud != null:
+		hud.set_gold(_gold)
+	if audio != null:
+		audio.play("pickup")
+	# 整块重画：金币数、售罄状态都变了。局部改一个按钮要维护两套状态，
+	# 而这张面板每帧的刷新成本是零（它只在暂停时存在）。
+	hud.open_shop(_gold, _shop_stock)
+
+
+func _close_shop() -> void:
+	if _state != State.SHOP:
+		return
+	hud.clear_overlays()
+	_state = State.PLAYING
+	_sync_pause()
+	if is_instance_valid(_merchant):
+		_merchant.consume()
+	# 买到战术手册时 _pending_cards 会 +1，但那条路径不会经过 _gain_xp，
+	# 所以必须在这里补一次开卡——否则卡会一直挂着，直到下一次升级才弹出来。
+	if _pending_cards > 0:
+		_open_level_up()
+
+
+## 三选一的兑现。数值都刻意给得"能用一次"而不是"能翻盘"：
+## 门是节奏点，不是奖励关卡——真正的成长曲线在卡牌上。
+func _grant_portal_reward(reward: int) -> void:
+	if not is_instance_valid(player):
+		return
+	match reward:
+		Portal.Reward.BREACH:
+			# 直接进账而不是掉在地上：换图会清空 _items，掉地上的会当场消失
+			_breach += 3
+			if hud != null:
+				hud.set_breach(_breach)
+		Portal.Reward.GOLD:
+			_add_gold(90)
+		Portal.Reward.CARD2:
+			_pending_cards += 2
+		_:
+			_pending_cards += 1
+
+
+## 换图：清场 + 重铺迷宫 + 把玩家放到新起点。
+## 这里不清 _elapsed：它是"这一局活了多久"，跨图必须连续；
+## 清掉的话每张图都从头算血量曲线，难度会被反复拉回开局。
+func _rebuild_map() -> void:
+	for e in _enemies:
+		if is_instance_valid(e):
+			e.queue_free()
+	_enemies.clear()
+	for g in _gems:
+		if is_instance_valid(g):
+			g.queue_free()
+	_gems.clear()
+	for item in _items:
+		if is_instance_valid(item):
+			item.queue_free()
+	_items.clear()
+	# 商人不在上面几张表里，必须点名清：不清的话上一张图的柜台会跟着
+	# 新迷宫的坐标系统留在原地，玩家下一局会在墙里看见一个商人
+	if is_instance_valid(_merchant):
+		_merchant.queue_free()
+	_merchant = null
+	_boss = null
+	_boss_grace = 0.0
+	if is_instance_valid(maze):
+		# 先摘再 free：同名节点在同一帧里共存会触发 Node 重命名，
+		# 而 MazeMap 的 z_index 与绘制顺序都依赖它老老实实叫 MazeMap。
+		world.remove_child(maze)
+		maze.queue_free()
+	maze = MazeMap.new()
+	maze.name = "MazeMap"
+	world.add_child(maze)
+	maze.build(randi())
+	if is_instance_valid(player):
+		player.global_position = maze.start_pos()
+		player.reset_physics_interpolation()
+		player.maze = maze
+		# 落地保护：新图的怪从零开始刷，但玩家刚在上一张图打完 Boss，
+		# 血和弹都不是满的，前 1.5 秒不该被算作"操作失误"。
+		player.grant_invuln(1.5)
+	maze.rebuild_flow(maze.start_pos())
+	_spawn_merchant()
+	# 给新图的第一次刷怪留两秒：玩家要看清自己在哪、宝箱（宝石）在哪
+	_spawn_timer = 2.0
+	_update_hud()
 
 
 ## 关卡推进：击杀章节 Boss 就是"过了一关"。这里是 P2-8 的落点——
@@ -741,11 +1522,13 @@ func _advance_stage() -> void:
 
 	if not _cleared and Stage.is_cleared(_stage_index):
 		_cleared = true
+		if audio != null:
+			audio.play("clear")
 		hud.show_banner("通关 · 三章走完", "深渊没有底，但你已经在最深处站住了", Stage.tint(_stage_index), true)
 		if is_instance_valid(player):
 			# 通关把血补满：后面是无尽轮次，血量在这里清零等于把奖励变成了惩罚
 			player.heal(player.max_health)
-			player.add_trauma(0.9)
+			player.add_trauma(0.8)
 		# 通关奖励两张卡，后续每章一张
 		_pending_cards += 2
 		_update_hud()
@@ -804,9 +1587,10 @@ func _on_enemy_spit(at: Vector2, direction: Vector2) -> void:
 	var shot := EnemyShot.new()
 	shot.target = player
 	shot.velocity = direction * SPIT_SPEED
-	shot.damage = SPIT_DAMAGE
+	shot.damage = SPIT_DAMAGE * _power_scale()
 	world.add_child(shot)
 	shot.global_position = at
+	shot.reset_physics_interpolation()
 
 
 ## 视野外接半径：视口半尺寸 / 相机缩放 得到的半宽半高，取对角线长度。
@@ -817,29 +1601,15 @@ func _view_radius() -> float:
 	return maxf(half.length(), 1.0)
 
 
-## 缩圈每帧 tick + 圈外伤害结算。
-## 毒伤必须走 Player.take_zone_damage()：take_damage() 开头就是"无敌帧内直接返回"，
-## 而 0.45 秒无敌比 0.5 秒的毒伤跳还长——被怪贴身打的时候，毒会被整段吞掉，
-## 变成"挨打反而不中毒"。这条路不吃无敌帧、不触发闪白，但会点亮红边。
-func _tick_zone(delta: float) -> void:
-	if zone == null or not is_instance_valid(zone):
+## 迷宫流场每帧刷新。rebuild_flow 内部有「玩家没换格就跳过」的短路，
+## 所以每帧调用也只有一次 int 比较；真正重算只发生在跨格时（432 格 BFS）。
+## 去毒圈后这里不再有圈外伤害 / 警告音 / 死因改写那一层结算——地图边界由
+## MazeMap.constrain 在玩家与敌人各自的位移末尾挡住，不需要每帧轮询。
+func _tick_maze(_delta: float) -> void:
+	if maze == null or not is_instance_valid(maze):
 		return
-	zone.tick(delta)
-	_zone_dmg_timer += delta
-	if _zone_dmg_timer < ZONE_TICK:
-		return
-	var step: float = _zone_dmg_timer
-	_zone_dmg_timer = 0.0
-	var rate: float = zone.dps()
-	if rate <= 0.0 or not is_instance_valid(player):
-		return
-	if not zone.is_outside(player.global_position):
-		return
-	var amount: float = player.max_health * rate * step
-	# 死因要在伤害生效前写：take_zone_damage 会同步 emit died，_on_player_died 当场读这个字段
-	if player.health <= amount:
-		_death_cause = "圈外"
-	player.take_zone_damage(amount)
+	if is_instance_valid(player):
+		maze.rebuild_flow(player.global_position)
 
 
 ## 刷怪点：视野椭圆的外接环。用视口尺寸 / 相机缩放反推世界可见范围，
@@ -850,21 +1620,16 @@ func _spawn_offset(angle: float) -> Vector2:
 	return Vector2(cos(angle) * extent.x, sin(angle) * extent.y) * grow
 
 
-## 把生成点收进安全区外沿。
-## 圈半径小于视野半径时，"视野外"和"圈内"会打架：按视野外接椭圆算出来的点落在毒里，
-## 怪刷出来就站在圈外，永远追不到玩家，看起来还像从紫幕里凭空冒出来。
-## 这里统一收到 1.03R——刚好在壁外一点，视觉上就是"从紫幕里钻出来"，然后自己走进圈。
-## 敌人不吃毒（见 Zone 的说明），所以站在壁外这一小段完全无害。
-func _clamp_point_into_zone(at: Vector2) -> Vector2:
-	if zone == null or not is_instance_valid(zone):
+## 把任何落点收进迷宫的可走格。去毒圈后不再有"安全区外沿"，
+## 敌人 / Boss / 宝石 / 破甲弹四类落点都从这里过一遍：
+## 已经在可走格就原样返回，落在墙里就吸到最近的可走格中心——
+## 吸到近处而不是随机远处，是为了宝石不会因为掉在墙边就飞到地图另一头。
+func _clamp_into_walkable(at: Vector2) -> Vector2:
+	if maze == null or not is_instance_valid(maze):
 		return at
-	var limit: float = zone.radius * 1.03
-	if limit <= 1.0:
+	if maze.has_floor_at(at):
 		return at
-	var offset: Vector2 = at - zone.center
-	if offset.length() <= limit:
-		return at
-	return zone.center + offset.normalized() * limit
+	return maze.nearest_floor_point(at)
 
 
 ## 每物理帧重建一次网格。Game 是 World 的父节点，_physics_process 先于敌人执行，
@@ -954,25 +1719,69 @@ func _cull_far_enemies() -> void:
 			enemy.queue_free()
 
 
+## 一只怪值多少金币。故意做成"数量级"而不是按血量线性：
+## 金币的用途只有商人三件货，玩家需要的是"攒两三张图能买一件"的节奏感，
+## 而不是一个精确到个位的经济体。精英 8 是普通怪的 4 倍，
+## 和它 xp_value 的 3 倍大致同步——"打精英划算"这件事要在所有资源上都成立。
+func _coin_reward(enemy: Enemy) -> int:
+	if enemy.kind == Enemy.Kind.BOSS:
+		return 40
+	if enemy.tier > 0:
+		return 8
+	# 特殊怪（冲锋者 / 吐息者 / 自爆怪）多给 1 块：它们更难处理，
+	# 而"优先点掉吐息者"这件事必须在金币上也划算，否则玩家只会挑软的打。
+	if enemy.kind == Enemy.Kind.GRUNT:
+		return GOLD_BASE_KILL
+	return GOLD_BASE_KILL + 1
+
+
+func _add_gold(amount: int) -> void:
+	if amount <= 0:
+		return
+	_gold += amount
+	if hud != null:
+		hud.set_gold(_gold)
+
+
 func _on_enemy_died(enemy: Enemy, xp: int) -> void:
 	_enemies.erase(enemy)
 	_kills += 1
+	_add_gold(_coin_reward(enemy))
 	# Boss 单独计数：它同时打乱"精英数"和"击杀数"的语义，结算面板要分开显示
 	var is_boss: bool = enemy.kind == Enemy.Kind.BOSS
 	if is_boss:
 		_boss_kills += 1
 	elif enemy.tier > 0:
 		_elite_kills += 1
-	# 普通击杀几乎无感（靠连杀累积出"战场在动"），精英击杀单独给一记明显的顿挫
+	if not is_boss and audio != null:
+		audio.play("kill")
+	# 普通击杀**不给震动**。单个 0.04 的震动幅度只有 0.06 像素，本来就看不见，
+	# 它的作用全部来自累加：后期 13~25 击杀/秒 → 0.5~1.0/s 的持续注入，
+	# trauma 稳态被顶到 0.4 左右，屏幕就一直抖。这是"后期很震荡"的直接原因。
+	# "战场在动"已经由音效、火花、伤害数字给了，不需要靠震屏表达。
+	# 精英击杀保留一记，但降到 0.15（0.25 在 60fps 下已经是 2 像素，偏重）。
 	if is_instance_valid(player):
-		player.add_trauma(0.25 if enemy.tier > 0 else 0.04)
+		player.add_trauma(0.15 if enemy.tier > 0 else 0.0)
 		# 击杀是回蓝的主要来源，自然回蓝只是保底
 		player.add_mana(HeroClass.MANA_PER_KILL[_hero])
 	if is_boss:
-		_on_boss_killed()
+		# 位置要在这里取：节点已经 queue_free，但同一帧里 transform 还读得到。
+		# 四扇门就开在 Boss 倒下的地方，玩家不用回头找。
+		_on_boss_killed(enemy.global_position)
 		_boss_gem_burst(enemy.global_position, _gem_value(xp))
 	else:
 		_spawn_gem(enemy.global_position, _gem_value(xp))
+		# 破甲弹按"攒够一个间隔就在尸体处掉一枚"兑现。
+		# Boss 战期间不在这里掉：那段由 _tick_breach 独占，否则召唤物一多就会
+		# 变成"杀小怪刷弹 → 站着输出 Boss"的循环，Boss 战反而比平时轻松。
+		if _boss == null:
+			var interval: float = _breach_interval()
+			if _breach_timer >= interval:
+				_breach_timer -= interval
+				_spawn_breach(enemy.global_position)
+				# 精英额外补一枚：它本来就要多花几秒，回报要能当场看见
+				if enemy.tier > 0:
+					_spawn_breach(enemy.global_position + Vector2(0.0, 22.0))
 
 
 ## Boss 掉落：原来只给一颗大宝石，捡起来一下就没了。
@@ -983,7 +1792,7 @@ func _boss_gem_burst(at: Vector2, total: int) -> void:
 	for i in range(BOSS_GEM_COUNT):
 		var angle: float = TAU * float(i) / float(BOSS_GEM_COUNT) + randf() * 0.25
 		var point: Vector2 = at + Vector2(cos(angle), sin(angle)) * randf_range(26.0, 56.0)
-		_spawn_gem(_clamp_point_into_zone(point), each)
+		_spawn_gem(_clamp_into_walkable(point), each)
 
 
 ## 波次越高每颗宝石越值钱（1 分钟 ×2、2 分钟 ×3、3 分钟以后 ×4）。
@@ -995,6 +1804,10 @@ func _gem_value(base: int) -> int:
 ## 受击火花。概率过滤 + 粒子上限双保险：前者的作用是别让画面糊掉，
 ## 后者的作用是保证再极端的情况也不会因为绘制量爆掉而掉帧。
 func _on_enemy_hit(at: Vector2, tint: Color) -> void:
+	# 音效放在火花概率判断之前：火花是"给眼睛看的采样"，声音是"给耳朵听的确认"，
+	# 两者的密度上限完全不同。被随机数拦掉的那一半命中，玩家一样打中了。
+	if audio != null:
+		audio.play("hit")
 	if _sparks == null or randf() > HIT_SPARK_CHANCE:
 		return
 	_sparks.burst(at, tint.lightened(0.35), 3)
@@ -1007,12 +1820,74 @@ func _spawn_gem(at: Vector2, value: int) -> void:
 	gem.collected.connect(_on_gem_collected)
 	world.add_child(gem)
 	gem.global_position = at
+	gem.reset_physics_interpolation()
 	_gems.append(gem)
 
 
 func _on_gem_collected(gem: XpGem, value: int) -> void:
 	_gems.erase(gem)
+	# Boss 死时会炸出 8 颗，连收 8 声会堆成一片。pickup 的 gap 是 0.04 秒、
+	# 带 ±10% 音高抖动，所以听起来是"叮叮叮"的连续上行，正是"捡到一堆"的感觉。
+	if audio != null:
+		audio.play("pickup")
+	if tutorial != null:
+		tutorial.notify("pickup", "靠近发光的小点会拾取经验，那是变强的唯一来源", "", 2.8)
 	_gain_xp(value)
+
+
+# ---------------------------------------------------------------- 破甲弹
+
+## 每章"多久掉一枚"从 Stage 读，不在这里写死：三章的难度差异本来就该由章节表表达，
+## 写在 Game 里的话，改一章就得回来翻这份代码。
+func _breach_interval() -> float:
+	return float(Stage.at(_stage_index).get("breach_every", 4.5))
+
+
+## 掉落节奏。计时器一直在走，但"落在哪"分两种情况：
+##   Boss 在场 —— 直接掉在玩家周围一圈：弹堆在杀怪点的话，Boss 战里根本绕不过去捡
+##   平时     —— 攒着，等下一次击杀掉在尸体处（玩家看得见自己"为什么得到它"）
+func _tick_breach(delta: float) -> void:
+	_breach_timer += delta
+	if _boss == null or not is_instance_valid(_boss):
+		return
+	if _breach_timer < _breach_interval() * BREACH_BOSS_FIGHT_SCALE:
+		return
+	_breach_timer = 0.0
+	var angle: float = randf() * TAU
+	_spawn_breach(_clamp_into_walkable(
+		player.global_position + Vector2.RIGHT.rotated(angle) * 180.0))
+
+
+func _spawn_breach(at: Vector2) -> void:
+	var item := ItemModule.new()
+	item.target = player
+	item.collected.connect(_on_item_collected)
+	world.add_child(item)
+	item.global_position = at
+	item.reset_physics_interpolation()
+	_items.append(item)
+
+
+func _on_item_collected(item: ItemModule) -> void:
+	_items.erase(item)
+	_breach += 1
+	if hud != null:
+		hud.set_breach(_breach)
+	if audio != null:
+		audio.play("pickup")
+	if tutorial != null:
+		tutorial.notify("breach", "破甲弹：Boss 的壳只有它能打穿，按发消耗", "", 3.0)
+
+
+## Boss 每"吃"一发弹都走这里。返回 false 表示弹尽——那一击会被判为免疫。
+## 这是整个机制的开关：想改成"破甲持续 N 秒"只需改这一个函数，武器侧不用动。
+func _consume_breach() -> bool:
+	if _breach <= 0:
+		return false
+	_breach -= 1
+	if hud != null:
+		hud.set_breach(_breach)
+	return true
 
 
 func _cull_far_gems() -> void:
@@ -1036,9 +1911,8 @@ func _gain_xp(amount: int) -> void:
 		_xp -= _xp_need
 		_level += 1
 		_xp_need = int(float(_xp_need) * XP_GROWTH) + 1
-		# 升级顺手回一口血：让"刷经验"同时是续航手段，而不是只能靠打到回血卡
-		if is_instance_valid(player):
-			player.heal(player.max_health * LEVEL_HEAL_RATIO)
+		# 这里原来有一口 6% 回血。删掉之后"升级"只给卡，不再兼作续航——
+		# 血要回就得脱战、或者去找商人买。升级同时回血会把这两条路一起废掉。
 		if _level >= _next_card_level:
 			_pending_cards += 1
 			_next_card_level = _level + CARD_GAP
@@ -1054,6 +1928,10 @@ func _open_level_up() -> void:
 	if _state != State.PLAYING:
 		return
 	_state = State.LEVEL_UP
+	# 升级音在暂停之前播：此刻 paused 还没置位，不受暂停分流影响。
+	# 万一调用顺序被改动，SPECS 里 levelup 也标了 paused_ok，两条路都能出声。
+	if audio != null:
+		audio.play("levelup")
 	get_tree().paused = true
 	# 摇杆的感应区盖着半块屏幕，不收起来会把三张卡的点击全吃掉
 	if touch != null:
@@ -1184,6 +2062,8 @@ func _choose(index: int) -> void:
 		return
 	if index < 0 or index >= _choices.size():
 		return
+	if audio != null:
+		audio.play("card")
 	_apply_upgrade(_choices[index])
 	_pending_cards = maxi(_pending_cards - 1, 0)
 	hud.close_level_up()
@@ -1263,10 +2143,18 @@ func _on_skill_button() -> void:
 		return
 	if player.try_use_skill():
 		player.add_trauma(0.2)
+		if audio != null:
+			audio.play("skill")
 
 
 func _on_player_died() -> void:
 	_state = State.GAME_OVER
+	# dead 在 paused 之前播；SPECS 里也标了 paused_ok，因为死亡的同一帧里
+	# _on_player_died 是先设 state 后暂停，顺序一变这里就会哑掉。
+	if audio != null:
+		audio.play("dead")
+	if tutorial != null:
+		tutorial.flush()
 	get_tree().paused = true
 	player.visible = false
 	if touch != null:
@@ -1313,10 +2201,31 @@ func _input(event: InputEvent) -> void:
 	if key_event == null or not key_event.pressed or key_event.echo:
 		return
 
+	# 静音是唯一一个"战斗中也可能马上要用"的开关：外放玩到一半需要安静，
+		# 不该逼玩家先死一次回菜单。放在 match 之前，任何状态都响应。
+	if key_event.keycode == KEY_M and audio != null:
+		audio.toggle_muted()
+		return
+
 	match _state:
 		State.PLAYING:
 			if key_event.is_action_pressed("cast_skill") and is_instance_valid(player):
 				player.try_use_skill()
+			elif key_event.keycode == KEY_P or key_event.keycode == KEY_ESCAPE:
+				_on_pause_toggled()
+		State.PAUSED:
+			# 暂停时同一个键就是"继续"。不额外接受 R：键盘玩家在暂停面板里按 R，
+			# 十次里有九次是手滑，而"重新开始"在面板上是一颗要看清才敢点的按钮。
+			if key_event.keycode == KEY_P or key_event.keycode == KEY_ESCAPE:
+				_on_pause_toggled()
+		State.CONFIRM:
+			# 确认门：默认不传，ESC 等于"再想想"。错传的代价是一整张图，
+			# 所以这里没有"回车确认"这种一按就走的路径。
+			if key_event.keycode == KEY_ESCAPE or key_event.keycode == KEY_P:
+				_cancel_portal()
+		State.SHOP:
+			if key_event.keycode == KEY_ESCAPE or key_event.keycode == KEY_P:
+				_close_shop()
 		State.LEVEL_UP:
 			if key_event.keycode >= KEY_1 and key_event.keycode <= KEY_9:
 				_choose(key_event.keycode - KEY_1)
@@ -1325,6 +2234,28 @@ func _input(event: InputEvent) -> void:
 				_restart()
 			elif key_event.keycode == KEY_P or key_event.keycode == KEY_ESCAPE:
 				_open_menu()
+
+
+## 战斗中暂停 / 继续。只允许 PLAYING ↔ PAUSED 这一条边：
+## 选卡（LEVEL_UP）本身就已经冻结了整棵树，再按暂停会变成"面板叠面板"；
+## 结算与菜单里也不该出现"继续"——那里按继续没有任何东西可恢复。
+## 真正的冻结仍然由 _sync_pause() 统一裁决，这里只负责换状态。
+func _on_pause_toggled() -> void:
+	if _state == State.PLAYING:
+		_state = State.PAUSED
+		# 摇杆跟着收起：暂停时背后还露着两个圆圈，既挡面板又让玩家以为还能推。
+		# 顺带把 InputMap 里的方向动作清掉——手指压在摇杆上按暂停，不会在恢复瞬间窜出去。
+		if touch != null:
+			touch.set_active(false)
+		# 副标题带上进度：暂停是玩家唯一会"回头看一眼自己打到哪了"的时刻
+		hud.show_pause(true, "%s　·　Lv.%d　·　击杀 %d" % [_map_text(), _level, _kills])
+		_sync_pause()
+	elif _state == State.PAUSED:
+		_state = State.PLAYING
+		hud.show_pause(false)
+		if touch != null:
+			touch.set_active(true)
+		_sync_pause()
 
 
 ## 同一个人再来一局：不重载场景，昵称与个人最高分都保留
@@ -1344,42 +2275,55 @@ func _mmss(seconds: float) -> String:
 	return "%02d:%02d" % [whole / 60, whole % 60]
 
 
-## 安全区那一行字。三种状态一眼能分：
-##   收缩中 → "安全区收缩中 00:45"（现在就得挪）
-##   稳定   → "安全区 02:00 后收缩"（还有多久）
-##   圈外   → 换成伤害速率，整行由 HUD 染红
-## 不报"当前半径"这种数字：玩家真正需要的是时间，半径用眼睛看那条紫线就够了。
-func _zone_text(outside: bool) -> String:
-	if outside:
-		return "圈外！  -%.1f%% 生命/秒" % (zone.dps() * 100.0)
-	if zone.segment_label() == "终局":
-		return "终局  %s" % _mmss(zone.segment_time_left())
-	if zone.is_shrinking():
-		return "安全区收缩中  %s" % _mmss(zone.segment_time_left())
-	return "安全区  %s 后收缩" % _mmss(zone.segment_time_left())
+## 地图状态行。去毒圈后没有倒计时可报，改为「第几张图 + 本图用时」。
+## P2 的完成度提示会接着往这行里加字，箭头复用 ZoneArrow（传零向量时自动隐藏）。
+func _map_text() -> String:
+	# 难度百分比直接写出来：+10% 的递增如果只藏在数值里，玩家永远感受不到"我在变强/敌人在变强"，
+	# 只会觉得"后面莫名其妙打不动了"。这个数字就是这条机制的可见面。
+	if _floor <= 0:
+		return "第 %d 图 · 探索 %s" % [_map_index + 1, _time_text()]
+	return "第 %d 图 · 敌 +%d%% · %s" % [
+		_map_index + 1, int(round((_power_scale() - 1.0) * 100.0)), _time_text()]
+
+
+## 离玩家最近的一扇门的位移。没有门时返回零向量（箭头会自动隐藏）。
+func _nearest_portal_offset() -> Vector2:
+	if not is_instance_valid(player):
+		return Vector2.ZERO
+	var best: Vector2 = Vector2.ZERO
+	var best_dist: float = 99999.0
+	for p in _portals:
+		if not is_instance_valid(p):
+			continue
+		var delta: Vector2 = p.global_position - player.global_position
+		if delta.length() < best_dist:
+			best_dist = delta.length()
+			best = delta
+	return best
 
 
 func _update_hud() -> void:
 	hud.set_progress(float(_xp), float(_xp_need))
 	var stage: Dictionary = Stage.at(_stage_index)
 	var boss_alive: bool = _boss != null and is_instance_valid(_boss)
-	hud.set_stage(
-		Stage.title(_stage_index),
-		clampf(_stage_time / maxf(float(stage["length"]), 1.0), 0.0, 1.0),
-		boss_alive,
-		Stage.tint(_stage_index),
-	)
+	var progress: float = clampf(_stage_time / maxf(float(stage["length"]), 1.0), 0.0, 1.0)
+	if _awaiting_portal:
+		# 挑门期间进度条钉在满格：章节其实已经在 100%，只是还没翻页。
+		# 让它继续涨会把 1.0 之后的部分截掉，看起来像"卡住了"。
+		progress = 1.0
+	hud.set_stage(Stage.title(_stage_index), progress, boss_alive, Stage.tint(_stage_index))
 	# 时间放进来是为了让老玩家还能对表：章节推进多少秒是可变节奏，
 	# 但"我这局撑了多久"仍然是排行榜和手感的共同基准。
 	hud.set_stats("%s  Lv.%d    击杀 %d    时间 %s" % [HeroClass.NAMES[_hero], _level, _kills, _time_text()])
 	hud.set_next_upgrade(_next_card_level)
 	hud.set_danger(_danger_level())
-	var outside: bool = false
-	if zone != null and is_instance_valid(zone) and is_instance_valid(player):
-		outside = zone.is_outside(player.global_position)
-		hud.set_zone_status(_zone_text(outside), outside)
-		# 屏幕位移 = 世界位移 × 相机缩放（相机始终跟着玩家，玩家就在屏幕中心）
-		hud.set_zone_direction((zone.center - player.global_position) * Player.CAMERA_ZOOM, outside)
+	hud.set_zone_status(_map_text(), false)
+	# 箭头复用：挑门时指向最近的门。门开在 Boss 尸体周围，玩家常常被击退到
+	# 走廊另一头，没有指向的话"四扇门已开"就只是一句横幅。其余时候零向量自动隐藏。
+	if _awaiting_portal:
+		hud.set_zone_direction(_nearest_portal_offset() * Player.CAMERA_ZOOM, false)
+	else:
+		hud.set_zone_direction(Vector2.ZERO, false)
 	var best_score: int = 0
 	if _profile.has("best"):
 		best_score = int(_profile["best"].get("score", 0))

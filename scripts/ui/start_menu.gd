@@ -29,6 +29,10 @@ var _hero: int = HeroClass.WARRIOR
 ## 触屏模式下换操作说明，并且不自动抢焦点（一进菜单就弹软键盘会挡住半屏）
 var _touch_mode: bool = false
 var _hint: Label
+## 音效总控，由 Game 注入。菜单是玩家第一个能点到东西的地方，
+## 点击没有声音会显得"没接上"，所以这里的按钮要自己出声。
+var audio: GameAudio = null
+var _mute_btn: Button
 ## 防止一次点击里 emit 两次（连点 / 回车混用）导致重复开局
 var _locked: bool = false
 
@@ -96,13 +100,53 @@ func _build() -> void:
 	_box.add_child(hint)
 	_hint = hint
 
+	_build_mute_toggle()
 	_select_hero(HeroClass.WARRIOR)
+
+
+## 音效开关。放在菜单而不是战斗中：战斗里没人会停下来找静音键，
+## 而外放玩游戏的人第一次进菜单就需要它能关。
+## 用 Button 而不是 CheckBox，是为了和整个菜单的视觉一致（CheckBox 会带一套系统样式）。
+func _build_mute_toggle() -> void:
+	_mute_btn = Button.new()
+	_mute_btn.focus_mode = Control.FOCUS_NONE
+	_mute_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	_mute_btn.flat = true
+	_mute_btn.add_theme_font_override("font", UiKit.font())
+	_mute_btn.add_theme_font_size_override("font_size", 12)
+	_mute_btn.add_theme_color_override("font_color", Color(0.55, 0.62, 0.76))
+	_mute_btn.add_theme_color_override("font_hover_color", Color(0.78, 0.85, 0.96))
+	_mute_btn.pressed.connect(_on_mute_pressed)
+	_box.add_child(_mute_btn)
+	_refresh_mute_text()
+
+
+func _refresh_mute_text() -> void:
+	if _mute_btn == null:
+		return
+	var muted: bool = audio != null and audio.is_muted()
+	_mute_btn.text = "音效：关（点击开启）" if muted else "音效：开（点击关闭）"
+
+
+func _on_mute_pressed() -> void:
+	if audio == null:
+		return
+	# 先切换再播音：静音时切换成"开"要立刻听到一声确认，
+	# 切换成"关"时这一声会被 _muted 挡住——两种情况的听感都正确。
+	audio.toggle_muted()
+	audio.play("ui")
+	_refresh_mute_text()
+
+
+func _ui_sound() -> void:
+	if audio != null:
+		audio.play("ui")
 
 
 func _hint_text() -> String:
 	if _touch_mode:
 		return "左侧拖动移动 · 自动攻击 · 右下角放技能 · 升级点卡片\n结算页可直接再来一局或换人"
-	return "WASD / 方向键移动 · 自动攻击 · 空格放技能 · 升级点击卡片\n死亡后 R 再来一局 · P 换人"
+	return "WASD / 方向键移动 · 自动攻击 · 空格放技能 · 升级点击卡片\n死亡后 R 再来一局 · P 换人 · M 静音"
 
 
 ## 三张职业卡 + 下方一句说明。说明跟着选择切换，而不是三张卡各写一段——
@@ -187,6 +231,7 @@ func _make_class_button(index: int) -> Button:
 	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	button.focus_mode = Control.FOCUS_NONE
 	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	button.pressed.connect(_ui_sound)
 	button.pressed.connect(_select_hero.bind(index))
 
 	var box := VBoxContainer.new()
@@ -235,6 +280,7 @@ func _make_start_button() -> Button:
 	button.add_theme_stylebox_override("normal", UiKit.flat(Color(1.0, 0.85, 0.48), Color(1.0, 0.9, 0.6), 10, 0))
 	button.add_theme_stylebox_override("hover", UiKit.flat(Color(1.0, 0.9, 0.62), Color(1.0, 0.95, 0.75), 10, 0))
 	button.add_theme_stylebox_override("pressed", UiKit.flat(Color(0.9, 0.74, 0.4), Color(1.0, 0.9, 0.6), 10, 0))
+	button.pressed.connect(_ui_sound)
 	button.pressed.connect(_on_start_pressed)
 	return button
 
@@ -253,6 +299,7 @@ func _make_random_name_button() -> Button:
 	button.add_theme_stylebox_override("normal", UiKit.flat(Color(0.13, 0.17, 0.24), Color(1.0, 1.0, 1.0, 0.22), 8, 1))
 	button.add_theme_stylebox_override("hover", UiKit.flat(Color(0.18, 0.23, 0.32), Color(0.55, 0.75, 1.0, 0.8), 8, 1))
 	button.add_theme_stylebox_override("pressed", UiKit.flat(Color(0.22, 0.28, 0.38), Color(0.55, 0.75, 1.0, 0.9), 8, 1))
+	button.pressed.connect(_ui_sound)
 	button.pressed.connect(_on_random_name)
 	return button
 
@@ -356,6 +403,7 @@ func _make_row(rank: int, entry: Dictionary) -> Button:
 	button.add_theme_stylebox_override("normal", UiKit.flat(Color(0.1, 0.13, 0.19), Color(1.0, 1.0, 1.0, 0.08), 8, 1))
 	button.add_theme_stylebox_override("hover", UiKit.flat(Color(0.16, 0.21, 0.29), Color(0.55, 0.75, 1.0, 0.75), 8, 1))
 	button.add_theme_stylebox_override("pressed", UiKit.flat(Color(0.2, 0.26, 0.35), Color(0.55, 0.75, 1.0, 0.9), 8, 2))
+	button.pressed.connect(_ui_sound)
 	button.pressed.connect(_start_with.bind(player_name))
 
 	var row := HBoxContainer.new()

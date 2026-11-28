@@ -23,6 +23,18 @@ const ORDINALS: Array[String] = ["第一章", "第二章", "第三章"]
 
 ## charger / spitter / bomber 是"每只怪成为该类型的概率"，三者之和必须 ≤ 1，
 ## 剩下的部分全是普通小兵。普通小兵是包围与分离的主体，任何一章都不能没有它。
+##
+## breach_shots / breach_every 是破甲弹的两个配平旋钮，一起决定 Boss 战的手感：
+##   breach_shots —— 打穿这只 Boss 需要几发（Boss 生命 = 发数 × 单发固定伤害）
+##   breach_every —— 多少秒掉一枚（Boss 战期间按 0.6 倍加速）
+##
+## 这两个数从"12/16/20 发、4.0/4.5/5.0 秒"改到"18/23/28 发、2.4/2.5/2.6 秒"，
+## 是同一次改动：Boss 多了"出招无敌 / 破甲窗口"的循环，单场最短时长被钉在
+## "窗口数 × 一轮时长"上，血量必须抬高，否则两个窗口就打完了。
+## 但血量不能只抬不放——抬血量而不抬掉率，等于把 Boss 战拉成 60 秒的拉锯，
+## 而这局的毒圈只给 5~8 分钟。**单场 Boss 的目标时长是 25~35 秒**：
+## 18×1.44≈26s / 23×1.5≈35s / 28×1.56≈44s（Boss 战期间按 0.6 倍加速后的间隔）。
+## 改任意一个数，都先算一遍"发数 × 间隔"是不是还在 25~45 秒区间里。
 const LIST: Array[Dictionary] = [
 	{
 		"name": "残响浅滩",
@@ -33,6 +45,8 @@ const LIST: Array[Dictionary] = [
 		"spitter": 0.0,
 		"bomber": 0.0,
 		"hp_scale": 1.0,
+		"breach_shots": 18,
+		"breach_every": 2.4,
 		"tint": Color(0.36, 0.82, 0.74),
 		"bg": Color(0.043, 0.068, 0.075),
 	},
@@ -45,6 +59,8 @@ const LIST: Array[Dictionary] = [
 		"spitter": 0.10,
 		"bomber": 0.0,
 		"hp_scale": 1.05,
+		"breach_shots": 23,
+		"breach_every": 2.5,
 		"tint": Color(0.92, 0.66, 0.32),
 		"bg": Color(0.070, 0.055, 0.038),
 	},
@@ -57,6 +73,8 @@ const LIST: Array[Dictionary] = [
 		"spitter": 0.10,
 		"bomber": 0.09,
 		"hp_scale": 1.12,
+		"breach_shots": 28,
+		"breach_every": 2.6,
 		"tint": Color(0.66, 0.50, 0.96),
 		"bg": Color(0.055, 0.045, 0.085),
 	},
@@ -81,9 +99,12 @@ const BOSS_HINTS: Dictionary = {
 	"蚀影": "你看到的那只，是它留在原地的影子",
 	"深潜者": "水压先到，它后到",
 }
-## 无尽每轮的血量倍率。1.3 而不是 1.5：全局时间曲线本身还在涨，
-## 两项相乘才是实际难度，压得太狠会让第二轮直接变成必死。
-const ENDLESS_HP_STEP: float = 1.3
+## 无尽每轮的额外血量倍率**已停用**（保留常量是为了不打断旧引用）。
+## 难度增长现在由 Game 的 _floor（每穿过一道传送门 ×1.10）独占：
+## 旧的 ENDLESS_HP_STEP 是 1.3，两项叠起来每关 1.43 倍，
+## 第 5 张图的怪血量会是第 1 张的 3 倍——那不是"更深一层"，是必死。
+## 一个乘数只能有一个来源，否则调任何一边都会把另一边顶穿。
+const ENDLESS_HP_STEP: float = 1.0
 ## 无尽每轮的长度增量：越往后单章越长，节奏不至于刚开打就结束
 const ENDLESS_LENGTH_STEP: float = 10.0
 
@@ -107,6 +128,11 @@ static func _endless(cycle: int) -> Dictionary:
 	data["bomber"] = 0.12
 	data["length"] = float(LIST[COUNT - 1]["length"]) + ENDLESS_LENGTH_STEP * float(cycle - 1)
 	data["hp_scale"] = float(LIST[COUNT - 1]["hp_scale"]) * pow(ENDLESS_HP_STEP, float(cycle))
+	# 无尽轮次的破甲需求跟着涨：每轮多 4 发、掉率每轮慢 0.6 秒。
+	# 它和 hp_scale 是两条独立的压力——hp_scale 只影响小怪，
+	# Boss 打不打得动只看破甲弹，所以这条必须单独抬。
+	data["breach_shots"] = int(LIST[COUNT - 1]["breach_shots"]) + 4 * cycle
+	data["breach_every"] = float(LIST[COUNT - 1]["breach_every"]) + 0.6 * float(cycle)
 	return data
 
 

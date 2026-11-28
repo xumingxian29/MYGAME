@@ -53,19 +53,41 @@ var _skills: int = 0
 ## Boss 事件跟踪：只在状态翻转时打一行，避免每秒刷屏
 var _boss_seen: bool = false
 var _boss_phase: int = 0
+## 上一次打 Boss 状态行的时刻
+var _boss_log_t: float = 0.0
 ## 单局结果，供最后汇总中位数与死因分布
 var _results: Array[Dictionary] = []
 ## 本局是否出现过毒圈（没有毒圈的版本用来跑基线，列位显示「—」）
 var _zone_seen: bool = false
+## --trace：逐帧打印世界状态指纹，用来判定"同种子两次跑是否逐位一致"。
+## 只看结果（存活秒数）无法定位分岔点，必须逐帧对齐才能知道是哪一帧开始不一样。
+var _trace: bool = false
+var _frame: int = 0
+## --rngtrace：把全局 RNG 的抽取值也塞进指纹。
+## 每帧固定消耗一次 randi() 不会影响可比性（两遍都一样），但能把
+## "某一帧偷偷多消耗了一次 randf" 的错位精确到帧，而不是等到下一次刷怪才显现。
+var _rngtrace: bool = false
+var _rng_probe: int = 0
+## --stop-at=N：跑到第 N 个物理帧就退出，用于快速复现前 30 秒的分岔。
+## 独立计数，不复用 _frame（后者只在 --trace 时增长，否则 stop-at 会永远不触发）。
+var _stop_at: int = 0
+var _tick: int = 0
 
 
 func _initialize() -> void:
 	_limit = _zone_cap() + 120.0
 	# idle（完全不动）作为下限只留两个种子：它必然在 60~80 秒死，多跑几局没有信息量，
 	# 却会把"总体中位数"拖到没有意义的低值。实战口径看两个 kite 策略。
-	# 种子默认写死，保证回归可复现（同配置两次跑出来的每一局数字都一样）。
-	# 但"复现"只能证明没漂移，要拿新的统计口径得换种子：
-	#   -- --seeds=21,22,23
+	#
+	# 确定性（2026-11-25 修好，此前那段「n=6 分辨不出 20%」的结论已作废）：
+	#   · 决策从 _process 迁到 _physics_process：此前 idle 帧会领先/落后物理帧 1~N 帧，
+	#     领先量取决于引擎初始化耗时，每个进程不同，输入注入与游戏读输入错开一帧。
+	#   · audio.gd 改用私有 RNG：音高抖动原先用全局 randf()，而限流按渲染帧推进，
+	#     放行数每进程不同，把玩法随机序列整体推歪。
+	#   · 完整 6 局批次连跑两遍：106537 帧逐帧指纹 diff = 0，六局结果逐位相同。
+	# 现在同一份构建 + 同一颗种子就是同一局，可以做单种子 A/B，不必硬堆种子数。
+	# 注意：修好后 RNG 序列变了，**此前所有历史基线数字不可直接沿用，必须重测**。
+	# 要拿新的统计口径就换种子：-- --seeds=21,22,23
 	var seeds: Array[int] = SEEDS
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--seeds="):
@@ -74,11 +96,28 @@ func _initialize() -> void:
 				seeds.append(int(t))
 	if seeds.is_empty():
 		seeds = SEEDS
+	# --only=kite 只跑策略名里含该子串的局。调参时要的是"某一类玩法"的数据，
+	# 一局 5 分钟 × 4 策略跑一轮要十几分钟，过滤掉没在改的玩法能省一半以上。
+	var only: String = ""
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--only="):
+			only = a.substr(7)
+	_trace = OS.get_cmdline_user_args().has("--trace")
+	_rngtrace = OS.get_cmdline_user_args().has("--rngtrace")
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--stop-at="):
+			_stop_at = int(a.substr(10))
 	for s in seeds:
 		_runs.append({"strategy": "kite_skill", "seed": s, "hero": HeroClass.WARRIOR, "skill": true})
 		_runs.append({"strategy": "kite_ranged", "seed": s, "hero": HeroClass.RANGER, "skill": true})
 	_runs.append({"strategy": "idle", "seed": 11, "hero": HeroClass.WARRIOR, "skill": false})
 	_runs.append({"strategy": "idle_skill", "seed": 11, "hero": HeroClass.WARRIOR, "skill": true})
+	if not only.is_empty():
+		var kept: Array[Dictionary] = []
+		for r in _runs:
+			if str(r["strategy"]).contains(only):
+				kept.append(r)
+		_runs = kept
 	var packed: PackedScene = load("res://MY主场景.tscn")
 	if packed == null:
 		_emit("FAIL 主场景加载失败")
@@ -88,7 +127,19 @@ func _initialize() -> void:
 	root.add_child(packed.instantiate())
 
 
-func _process(delta: float) -> bool:
+## 决策必须挂在物理帧，不能挂 idle 帧。
+##
+## 之前挂在 _process 时，同一份构建 + 同一颗种子跑两遍会分岔（181.5s / 240.9s）。
+## 实测 Engine.get_physics_frames() 会领先 get_process_frames() 一到几帧——
+## 引擎初始化、加载场景耗掉的墙钟时间决定领先多少，**每个进程不同**。
+## bot 在 idle 帧里注入 Input、按 idle delta 累加走位角、按 idle 帧采样，
+## 而游戏在物理帧读输入、推进世界：起点错开一帧，整条轨迹就岔了。
+## 移到 _physics_process 后，输入注入与游戏读输入同频，delta 恒等于物理步长。
+func _process(_delta: float) -> bool:
+	return _finished
+
+
+func _physics_process(delta: float) -> bool:
 	if _game == null:
 		_game = root.get_child(root.get_child_count() - 1)
 		if _game == null:
@@ -106,6 +157,21 @@ func _process(delta: float) -> bool:
 		_cards += 1
 		return false
 
+	# 传送确认（State.CONFIRM = 5）。台架每次都确认：
+	# 不点的话每一局都会停在门口，量到的是"卡在门上的时间"而不是下一张图。
+	# 这里用序号而不是 _game.State.CONFIRM：状态是 Game 的内部枚举，
+	# bot 通过实例读枚举在 --script 模式下偶尔会拿到未初始化的类。
+	if _game._state == 5:
+		_game._confirm_portal()
+		return false
+
+	# 商店（State.SHOP = 6）。bot 一律只逛不买：
+	# 买不买、买什么都是变量，会让 10 局基线不可比；
+	# 金币与商店的数值由 dev/shop_check.gd 单独覆盖。
+	if _game._state == 6:
+		_game._close_shop()
+		return false
+
 	if _game._state == 3:
 		_summary("死亡")
 		_next_run()
@@ -116,9 +182,65 @@ func _process(delta: float) -> bool:
 		_next_run()
 		return false
 
+	_tick += 1
 	_drive(delta)
 	_sample()
+	_trace_frame()
+	if _stop_at > 0 and _tick >= _stop_at:
+		print("=== stop-at %d 命中，提前退出" % _stop_at)
+		quit()
+		return true
 	return false
+
+
+## 逐帧世界指纹。刻意用字节序列而不是 "%.6f" 文本：
+## 文本格式化会把 1e-7 级的差异抹平，而那正好是分岔的起点。
+## 同一份构建 + 同一种子跑两次，两个日志应该在第一个不同的 T 行处分岔；
+## 那一帧之前的状态完全一致，就能反推出是哪个函数开始引入不确定性。
+func _trace_frame() -> void:
+	if not _trace:
+		return
+	_frame += 1
+	if not is_instance_valid(_game.player):
+		return
+	if _rngtrace:
+		# 诊断专用：每帧固定抽一次全局随机数。它本身不参与玩法，
+		# 但会让"某帧被别处多抽了一次"立刻体现在下一帧的指纹上。
+		_rng_probe = randi()
+	var buf: PackedByteArray = PackedByteArray()
+	if _rngtrace:
+		buf.append_array(var_to_bytes(_rng_probe))
+	buf.append_array(var_to_bytes(_game.player.global_position))
+	buf.append_array(var_to_bytes(_game.player.health))
+	buf.append_array(var_to_bytes(_game._elapsed))
+	buf.append_array(var_to_bytes(_game._kills))
+	buf.append_array(var_to_bytes(_game._level))
+	buf.append_array(var_to_bytes(_game._enemies.size()))
+	# 顺手验一条不变量：_enemies 的生成序号必须严格递增。
+	# 它成立，数组顺序就等于生成顺序，所有"遍历敌人"的判定顺序才是确定的。
+	var ordered: bool = true
+	var prev_serial: int = -1
+	for e in _game._enemies:
+		if not is_instance_valid(e):
+			continue
+		if e.spawn_serial <= prev_serial:
+			ordered = false
+		prev_serial = e.spawn_serial
+		buf.append_array(var_to_bytes(e.spawn_serial))
+		buf.append_array(var_to_bytes(e.global_position))
+		buf.append_array(var_to_bytes(e._health))
+		buf.append_array(var_to_bytes(e.kind))
+	var boss = _game._boss
+	if boss != null and is_instance_valid(boss):
+		buf.append_array(var_to_bytes(boss.global_position))
+		buf.append_array(var_to_bytes(boss._health))
+	var digest: String = Marshalls.raw_to_base64(buf).sha256_text().substr(0, 16)
+	print("T%06d t=%7.3f %s hp=%7.3f kill=%d lv=%d n=%d %s pf=%d phf=%d" % [
+		_frame, _game._elapsed, digest, _game.player.health,
+		_game._kills, _game._level, _game._enemies.size(),
+		"ord=OK" if ordered else "ord=BAD",
+		Engine.get_process_frames(), Engine.get_physics_frames(),
+	])
 
 
 func _drive(delta: float) -> void:
@@ -129,6 +251,8 @@ func _drive(delta: float) -> void:
 	if strategy.begins_with("kite"):
 		_angle += delta * 1.1
 		var dir: Vector2 = Vector2(cos(_angle), sin(_angle)).orthogonal()
+		dir = _steer_with_portal(dir.normalized(), delta)
+		dir = _steer_with_boss(dir.normalized())
 		dir = _steer_with_zone(dir.normalized())
 		if dir.x > 0.38:
 			Input.action_press("move_right")
@@ -161,6 +285,88 @@ func _steer_with_zone(dir: Vector2) -> Vector2:
 		return to_center.normalized()
 	if ratio > 0.75:
 		return (dir + to_center.normalized() * 1.2).normalized()
+	return dir
+
+
+## 门优先于 Boss 和绕圈：Boss 已经倒了，场上没有需要拉扯的东西，
+## 唯一该做的就是走进最近的一扇门。bot 不会进门的话，每一局都会卡在
+## "Boss 已死但不换图"，台架量出来的是一个静止场景，不是下一关。
+##
+## 墙是数据不是碰撞体，直线朝门走会贴着墙角滑不出去（实测 t=300 之后
+## 场上敌人数恒为 0、血量满格，就是卡住了）。所以加两层兜底：
+##   1. 位移不足就侧向试探（绕 63°），再卡就把试探方向翻面
+##   2. 挑门超过 3 秒直接把玩家放到门口——这里量的是"进门之后数值对不对"，
+##      不是"bot 会不会走迷宫"。真人靠 HUD 箭头和会绕路，不存在这个问题。
+var _portal_stuck: float = 0.0
+var _portal_wait: float = 0.0
+var _portal_last_pos: Vector2 = Vector2.ZERO
+var _portal_turn: float = 1.0
+
+
+func _steer_with_portal(dir: Vector2, delta: float) -> Vector2:
+	if not _game._awaiting_portal or _game._portals.is_empty():
+		_portal_stuck = 0.0
+		_portal_wait = 0.0
+		return dir
+	if not is_instance_valid(_game.player):
+		return dir
+	var best: Portal = null
+	var best_dist: float = 99999.0
+	for p in _game._portals:
+		if not is_instance_valid(p):
+			continue
+		var d: float = p.global_position.distance_to(_game.player.global_position)
+		if d < best_dist:
+			best = p
+			best_dist = d
+	if best == null:
+		return dir
+
+	var to: Vector2 = best.global_position - _game.player.global_position
+	if to.length() < 1.0:
+		return Vector2.ZERO
+	_portal_wait += delta
+
+	if _portal_last_pos.distance_to(_game.player.global_position) < 12.0:
+		_portal_stuck += delta
+	else:
+		_portal_stuck = 0.0
+		_portal_last_pos = _game.player.global_position
+
+	var want: Vector2 = to.normalized()
+	if _portal_stuck > 0.5:
+		want = want.rotated(_portal_turn * 1.1)
+		if _portal_stuck > 1.6:
+			_portal_stuck = 0.0
+			_portal_turn = -_portal_turn
+
+	if _portal_wait > 3.0 and to.length() > 60.0:
+		_game.player.global_position = best.global_position
+		_game.player.reset_physics_interpolation()
+		_portal_wait = 0.0
+		_portal_stuck = 0.0
+	return want
+
+
+## Boss：破甲窗口一开就往它身上贴，窗口外拉远。
+## 这条不是为了"让 bot 更强"，是因为 Boss 只在窗口里吃弹——
+## bot 不会抓时机的话，量出来的是"bot 有多笨"，而不是"这套机制把 Boss 战拉长了多少"。
+## 90 是"贴到武器都在射程内"的距离；320 是"出招时站到冲击波圈外"的距离。
+func _steer_with_boss(dir: Vector2) -> Vector2:
+	var boss: Enemy = _game._boss
+	if boss == null or not is_instance_valid(boss) or not is_instance_valid(_game.player):
+		return dir
+	var to_boss: Vector2 = boss.global_position - _game.player.global_position
+	var dist: float = to_boss.length()
+	if dist < 0.001:
+		return dir
+	if boss.is_vulnerable():
+		return to_boss / dist if dist > 70.0 else dir.orthogonal()
+	# 出招期间站到 210：贴着冲击波边缘（168）外侧，离得够近，窗口一开两步就能进射程。
+	# 原来写 320 是错的——Boss 出招时定身，退到 320 再跑回来要 1 秒多，
+	# 3 秒的窗口还没打就结束了，量出来的会是"bot 不会站位"。
+	if dist < 210.0:
+		return -to_boss / dist
 	return dir
 
 
@@ -213,7 +419,9 @@ func _sample() -> void:
 		if not is_instance_valid(enemy):
 			continue
 		alive += 1
-		var id: int = enemy.get_instance_id()
+		# 同样用生成序号而不是 instance_id：id 会被回收，
+		# 新怪会顶替死怪的身份，让「平均存活」这个指标把两段寿命算成一段。
+		var id: int = enemy.spawn_serial
 		seen[id] = true
 		if not _spawn_t.has(id):
 			_spawn_t[id] = now
@@ -258,12 +466,24 @@ func _track_boss(now: float) -> void:
 		if not _boss_seen:
 			_boss_seen = true
 			_boss_phase = 0
+			_boss_log_t = now
 			_emit("  [Boss] 入场 t=%3d  %s  血=%4.0f  速=%2.0f" % [
 				int(now), boss.boss_name, boss.max_health, boss._speed,
 			])
 		elif _boss_phase == 0 and int(boss._boss_phase_index) == 1:
 			_boss_phase = 1
 			_emit("  [Boss] 二阶段 t=%3d  剩余 %2.0f%%" % [int(now), boss.health_ratio() * 100.0])
+		# 每 5 秒一行状态：窗口期究竟有没有在输出，看"血% 的下降是否只发生在破甲段"。
+		if now - _boss_log_t >= 5.0:
+			_boss_log_t = now
+			var dist: float = 0.0
+			if is_instance_valid(_game.player):
+				dist = boss.global_position.distance_to(_game.player.global_position)
+			_emit("    t=%3d %-12s 血=%3.0f%% 弹=%2d 地面=%2d 距=%3.0f 己血=%3.0f" % [
+				int(now), boss.boss_state_text(), boss.health_ratio() * 100.0,
+				int(_game._breach), _game._items.size(), dist,
+				_game.player.health if is_instance_valid(_game.player) else 0.0,
+			])
 		return
 	if _boss_seen:
 		_boss_seen = false
@@ -316,6 +536,7 @@ func _next_run() -> void:
 	_alive_frames = 0
 	_angle = 0.0
 	_skills = 0
+	_frame = 0
 	_boss_seen = false
 	_boss_phase = 0
 	_zone_seen = false

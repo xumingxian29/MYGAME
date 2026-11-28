@@ -15,8 +15,10 @@ extends SceneTree
 ## 这里喂固定方向的假目标，招式节奏就是确定的。
 
 const DT: float = 1.0 / 60.0
-## 8 招 × 3 秒间隔 = 24 秒，留一倍余量
-const KIT_FRAMES: int = 1900
+## 一轮是"连招（2~3 招）+ 破甲窗口（3.8s）+ 追击（≤2.4s）"，
+## 8 招要 3~4 轮，最长的一轮（二阶段、招里有巨浪和裂地）约 11 秒——
+## 留一倍余量取 60 秒。按旧的"3 秒一招"算只会得到 24 秒，连一半都跑不完。
+const KIT_FRAMES: int = 3600
 const MAX_FRAMES: int = 9000
 ## Boss 掉落应该是 8 颗（Game.BOSS_GEM_COUNT），这里写死一份是为了"两边改歪了对不上"
 const EXPECT_BOSS_GEMS: int = 8
@@ -49,7 +51,7 @@ var _summons: int = 0
 
 func _initialize() -> void:
 	_out.append("=== Boss 招式自检 ===")
-	_out.append("招式编号：1 冲击波 / 2 冲锋前摇 / 3 冲锋中 / 4 瞬移 / 5 追踪弹 / 6 巨浪 / 7 召唤 / 8 弹幕")
+	_out.append("招式编号：1 冲击波 / 2 冲锋前摇 / 3 冲锋中 / 4 瞬移 / 5 追踪弹 / 6 巨浪 / 7 召唤 / 8 弹幕 / 9 裂地")
 	_out.append("")
 	_test_intro()
 	_test_kits()
@@ -205,6 +207,7 @@ func _move_name(move: int) -> String:
 		Enemy.MOVE_TIDE: return "巨浪"
 		Enemy.MOVE_SUMMON: return "召唤"
 		Enemy.MOVE_BARRAGE: return "弹幕"
+		Enemy.MOVE_STRIKE: return "裂地"
 	return "待机"
 
 
@@ -292,7 +295,10 @@ func _test_game_stage(idx: int) -> void:
 
 	# 击杀：掉 8 颗宝石，且章节推进
 	var gems_before: int = _game._gems.size()
-	boss.take_damage(1e9)
+	# bypass_shell=true：这里验的是"打死之后掉什么、章怎么推进"，
+	# 不是破甲机制本身（那部分在 dev/breach_check.gd）。Boss 现在有壳，
+	# 不带第二个参数的话这一击会被判免疫，整个自检卡在这里。
+	boss.take_damage(1e9, true)
 	_check("击杀后进入下一章", _game._stage_index == idx + 1,
 		"章节序号 %d，期望 %d" % [_game._stage_index, idx + 1])
 	_check("Boss 掉落 8 颗宝石", _game._gems.size() - gems_before == EXPECT_BOSS_GEMS,

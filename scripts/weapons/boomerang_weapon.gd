@@ -6,6 +6,9 @@ extends Node2D
 ## 命中用“每敌人独立冷却”：一枚镖一次飞行可多次命中同一敌人，但不会每帧都叠伤害。
 
 ## 由 Player 注入的敌人列表引用
+## 掷出回旋镖时发出。和近战的 swung() 同一个用途：武器只报告动作，不碰音频。
+signal thrown()
+
 var enemies: Array[Enemy] = []
 
 @export var count: int = 0
@@ -23,16 +26,27 @@ const MAX_FLIGHTS: int = 6
 
 var _cd: float = 0.0
 var _spin: float = 0.0
-## 每一波投掷：{"dirs": Array[float], "t": float}
+## 上一 tick 的旋转角。不取模、不 fmod：只喂给 cos/sin，
+## 保持单调递增才能在上一个值和这一个值之间安全插值（取模后会在 2π 处跳回去）。
+var _prev_spin: float = 0.0
+## 每一波投掷：{"dirs": Array[float], "t": float, "pt": float}
 var _flights: Array[Dictionary] = []
-## instance_id -> 剩余冷却秒数
+## 敌人生成序号(spawn_serial) -> 剩余冷却秒数
 var _hit_cd: Dictionary[int, float] = {}
+
+
+## 镖不是节点，是数组里的一行数据 + 本节点自绘，引擎的物理插值管不到。
+## 每渲染帧重绘一次，_draw 自己按插值分数补帧（见那里的说明）。
+func _process(_delta: float) -> void:
+	if count > 0 and not _flights.is_empty():
+		queue_redraw()
 
 
 func _physics_process(delta: float) -> void:
 	if count <= 0:
 		return
-	_spin = fmod(_spin + spin_speed * delta, TAU)
+	_prev_spin = _spin
+	_spin += spin_speed * delta
 	_tick_cooldowns(delta)
 	_update_flights(delta)
 	_cd = maxf(_cd - delta, 0.0)
@@ -47,6 +61,7 @@ func _duration() -> float:
 
 
 func _throw() -> void:
+	thrown.emit()
 	_cd = cooldown
 	var base: float = _aim_angle()
 	var n: int = maxi(count, 1)
@@ -54,7 +69,7 @@ func _throw() -> void:
 	for i in range(n):
 		# 均匀铺满一圈：1 枚朝最近敌人，2 枚对向，3 枚 120° 分布
 		dirs.append(base + TAU * float(i) / float(n))
-	_flights.append({"dirs": dirs, "t": 0.0})
+	_flights.append({"dirs": dirs, "t": 0.0, "pt": 0.0})
 	while _flights.size() > MAX_FLIGHTS:
 		_flights.remove_at(0)
 
@@ -81,6 +96,7 @@ func _update_flights(delta: float) -> void:
 	var index: int = _flights.size() - 1
 	while index >= 0:
 		var flight: Dictionary = _flights[index]
+		flight["pt"] = flight["t"]
 		flight["t"] = float(flight["t"]) + delta
 		var progress: float = clampf(float(flight["t"]) / duration, 0.0, 1.0)
 		# 三角波：去程与回程速度都是 fly_speed，不会出现中途突然加速
@@ -101,14 +117,14 @@ func _resolve_hit(local_pos: Vector2) -> void:
 	for enemy in enemies:
 		if not is_instance_valid(enemy) or enemy.is_queued_for_deletion():
 			continue
-		var id: int = enemy.get_instance_id()
-		if _hit_cd.has(id):
+		var key: int = enemy.spawn_serial
+		if _hit_cd.has(key):
 			continue
 		var reach: float = enemy.radius + HIT_RADIUS
 		if world_pos.distance_squared_to(enemy.global_position) > reach * reach:
 			continue
 		enemy.take_damage(damage)
-		_hit_cd[id] = HIT_COOLDOWN
+		_hit_cd[key] = HIT_COOLDOWN
 
 
 func _tick_cooldowns(delta: float) -> void:
@@ -125,9 +141,15 @@ func _tick_cooldowns(delta: float) -> void:
 func _draw() -> void:
 	if count <= 0:
 		return
+	# 与子弹同一个做法：位置不是节点变换，得自己在上一 tick 和这一 tick 之间取值。
+	# 飞行进度 t 是几何参数的唯一输入（半径由三角波算出来），所以插 t 就够了；
+	# 镖自身的旋转角同理插 _prev_spin → _spin。
+	var f: float = Engine.get_physics_interpolation_fraction()
+	var spin: float = lerpf(_prev_spin, _spin, f)
 	var duration: float = _duration()
 	for flight in _flights:
-		var progress: float = clampf(float(flight["t"]) / duration, 0.0, 1.0)
+		var t: float = lerpf(float(flight["pt"]), float(flight["t"]), f)
+		var progress: float = clampf(t / duration, 0.0, 1.0)
 		var reach: float = progress * 2.0
 		if reach > 1.0:
 			reach = 2.0 - reach
@@ -135,10 +157,10 @@ func _draw() -> void:
 		for i in range(flight["dirs"].size()):
 			var dir: float = flight["dirs"][i]
 			var pos: Vector2 = Vector2(cos(dir), sin(dir)) * radius
-			var spin: float = _spin + float(i) * 1.3
+			var arm_spin: float = spin + float(i) * 1.3
 			# 两片呈 V 形的镖臂，一眼能认出是回旋镖而不是子弹
-			draw_colored_polygon(_arm_points(pos, spin - 0.95), Color(1.0, 0.72, 0.3))
-			draw_colored_polygon(_arm_points(pos, spin + 0.95), Color(1.0, 0.88, 0.56))
+			draw_colored_polygon(_arm_points(pos, arm_spin - 0.95), Color(1.0, 0.72, 0.3))
+			draw_colored_polygon(_arm_points(pos, arm_spin + 0.95), Color(1.0, 0.88, 0.56))
 			draw_circle(pos, 3.2, Color(0.28, 0.16, 0.06))
 
 

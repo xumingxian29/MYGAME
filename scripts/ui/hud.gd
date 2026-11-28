@@ -9,8 +9,22 @@ signal card_chosen(index: int)
 ## 结算面板上的按钮（只在触屏设备出现：手机上既没有 R 也没有 P）
 signal restart_requested
 signal menu_requested
+## 暂停键。HUD 只报告"玩家按了暂停"，究竟该进还是该出由 Game 按当前状态决定：
+## 暂停面板里的"继续"和左上角的暂停键走同一条信号，语义是"切换"，不是"暂停"。
+signal pause_toggled
+## 传送确认面板的两颗按钮。面板本身不认识"下一张图"，它只把选择传回去。
+signal portal_confirmed
+signal portal_cancelled
+## 商店面板：买到第几号货 + 关闭。价格校验在 Game 侧做——
+## HUD 不知道玩家有多少钱，也不该知道。
+signal shop_buy(index: int)
+signal shop_closed
 
 const VIGNETTE_SHADER: Shader = preload("res://scripts/ui/damage_vignette.gdshader")
+
+## 音效引用，由 Game 注入。HUD 只在自己造按钮的地方用它播一声点击，
+## 不做任何音频决策（音量、限流、暂停分流都在 GameAudio 里）。
+var audio: GameAudio = null
 
 var _root: Control
 ## 低血红边：一个全屏 ColorRect + shader，单次绘制搞定，比用渐变贴图或
@@ -38,6 +52,12 @@ var _mp_ready: bool = false
 ## 触屏模式下文案换成"点按"，结算面板补两个可点按钮——手机上没有空格键，也没有 R / P
 var _touch_mode: bool = false
 var _stats_label: Label
+## 破甲弹存量。Boss 血条只在 Boss 战时出现，但"我还有几发"平时也得看得见——
+## 玩家需要据此决定"要不要为了捡弹绕一次路"。
+var _breach_label: Label
+## 金币。放在破甲弹下面：两者都是"能换成战力的资源"，
+## 排在一起玩家扫一眼就知道自己攒了多少资本。
+var _gold_label: Label
 var _next_label: Label
 var _name_label: Label
 var _score_label: Label
@@ -50,6 +70,14 @@ var _boss_panel: PanelContainer
 var _boss_bar: ProgressBar
 var _boss_name_label: Label
 var _boss_phase_label: Label
+## 状态字：攻击中 / 破甲 2.4s。这是整场 Boss 战里唯一"每秒都在变"的信息，
+## 玩家打 Boss 时视线本来就压在血条上，不需要再去找别的地方。
+var _boss_state_label: Label
+## 缓存当前状态，避免 10Hz 的刷新每次都重建 StyleBox 与主题色覆盖
+var _boss_vulnerable: bool = false
+var _boss_state_text: String = ""
+## 当前阶段：破甲窗口会把血条换成金色，窗口结束要能换回本阶段的颜色
+var _boss_phase_value: int = 0
 ## 章节栏：标题 + 进度条。进度条在 Boss 战期间停在一半（章节时钟也停着），
 ## 打完 Boss 换章时归零，所以"条走到头"和"Boss 出现"在玩家眼里是同一件事。
 var _stage_label: Label
@@ -71,6 +99,20 @@ var _banner_box: VBoxContainer
 var _banner_title: Label
 var _banner_sub: Label
 var _banner_t: float = 0.0
+
+## 常驻的暂停键。放在右上角分数那一列的最下面：
+## 那里是玩家视线最少停留的位置，误触代价最小，也不会挡住血条和 Boss 血条。
+## 返回入口**不在**这里——它只出现在暂停面板里。战斗中误触返回要丢一整局，
+## 而这颗按钮又正好在手指最容易划过的右上角；多一步确认的代价远小于一次误触。
+var _pause_btn: Button
+## 暂停面板。和结算面板共用 _dim 遮罩但各自独立显示：
+## 结算面板是"这一局结束了"，暂停面板是"这一局还活着，只是先停一下"，
+## 两者的按钮集合不同，混用一份面板会让文案状态互相污染。
+var _pause_panel: PanelContainer
+var _pause_sub: Label
+## 暂停面板里的「返回主菜单」。留引用只为一件事：自检要能验证"这颗按钮真的接到了
+## menu_requested"，而不是去调 Game._open_menu() 冒充点击。
+var _pause_menu_btn: Button
 
 ## 横幅总时长与淡入/淡出段：淡入要快（玩家在等结果），淡出要慢（不然像闪烁）
 const BANNER_TIME: float = 3.0
@@ -146,6 +188,13 @@ func _build() -> void:
 	_zone_label = _make_label("", 13, Color(0.78, 0.66, 1.0))
 	corner.add_child(_zone_label)
 
+	# 破甲弹紧跟在安全区下面：这两条都是"资源/时限"，都属于"现在必须知道"的一类。
+	_breach_label = _make_label("", 14, Color(1.0, 0.82, 0.42))
+	corner.add_child(_breach_label)
+
+	_gold_label = _make_label("", 14, Color(1.0, 0.86, 0.34))
+	corner.add_child(_gold_label)
+
 	_stats_label = _make_label("", 16, Color(0.82, 0.88, 0.98))
 	corner.add_child(_stats_label)
 	# 卡越到后期间隔越长，必须让玩家看得见"下一张卡在哪一级"
@@ -168,6 +217,16 @@ func _build() -> void:
 		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		right.add_child(label)
+
+	# 暂停键。放在分数下面而不是屏幕四角：四角在手机上会被拇指压住，
+	# 而右上是"战斗中几乎不会碰"的区域。
+	var tools := HBoxContainer.new()
+	tools.alignment = BoxContainer.ALIGNMENT_END
+	tools.add_theme_constant_override("separation", 8)
+	right.add_child(tools)
+
+	_pause_btn = _make_tool_button("暂停", Color(0.58, 0.76, 0.96), pause_toggled.emit)
+	tools.add_child(_pause_btn)
 
 	_build_boss_bar()
 	_build_banner()
@@ -193,6 +252,35 @@ func _build() -> void:
 	_panel_box = VBoxContainer.new()
 	_panel_box.add_theme_constant_override("separation", 10)
 	_panel.add_child(_panel_box)
+
+	_build_pause_panel(center)
+
+
+## 暂停面板：标题 + 一行进度 + 三个按钮。
+## 故意不显示"按 ESC 继续"这类键位提示——主目标是手机，桌面玩家按一次就知道了，
+## 而手机上多一行字只会把面板撑高、挤掉按钮的点击面积。
+func _build_pause_panel(center: CenterContainer) -> void:
+	_pause_panel = PanelContainer.new()
+	_pause_panel.visible = false
+	_pause_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.56, 0.74, 1.0, 0.85)))
+	center.add_child(_pause_panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 12)
+	_pause_panel.add_child(box)
+
+	var title := _make_label("已暂停", 30, Color(0.95, 0.97, 1.0))
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(title)
+
+	_pause_sub = _make_label("", 14, Color(0.70, 0.80, 0.94))
+	_pause_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(_pause_sub)
+
+	box.add_child(_make_action_button("继续", Color(0.52, 0.86, 0.72), pause_toggled.emit))
+	box.add_child(_make_action_button("重新开始", Color(1.0, 0.85, 0.48), restart_requested.emit))
+	_pause_menu_btn = _make_action_button("返回主菜单", Color(0.52, 0.68, 0.92), menu_requested.emit)
+	box.add_child(_pause_menu_btn)
 
 
 ## 屏顶 Boss 血条。不抢左右两栏的位置：桌面上居中贴顶，触屏上整体下移到状态条
@@ -224,6 +312,13 @@ func _build_boss_bar() -> void:
 	_boss_phase_label = _make_label("", 13, Color(0.96, 0.74, 0.74))
 	_boss_phase_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	head.add_child(_boss_phase_label)
+
+	# 状态字（攻击中 / 破甲 2.4s）放最右。给了最小宽度：
+	# 倒计时每 0.1 秒变一次字，不给宽度的话整条血条会跟着左右抖。
+	_boss_state_label = _make_label("", 13, Color(0.72, 0.80, 0.94))
+	_boss_state_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_boss_state_label.custom_minimum_size = Vector2(100, 0)
+	head.add_child(_boss_state_label)
 
 	_boss_bar = _make_bar(Color(0.92, 0.27, 0.32), Vector2(420, 15))
 	_boss_bar.max_value = 1.0
@@ -448,6 +543,133 @@ func set_zone_status(text: String, danger: bool) -> void:
 		)
 
 
+## 破甲弹存量。0 发时换成暗红并补一句"打不动"——
+## 只显示"×0"的话，玩家会以为是自己没打中，而不是"根本没带弹"。
+func set_breach(count: int) -> void:
+	if _breach_label == null:
+		return
+	if count > 0:
+		_set_text(_breach_label, "破甲弹 ×%d" % count)
+		_breach_label.add_theme_color_override("font_color", Color(1.0, 0.82, 0.42))
+	else:
+		_set_text(_breach_label, "破甲弹 ×0")
+		_breach_label.add_theme_color_override("font_color", Color(0.55, 0.58, 0.66))
+
+
+## 金币读数。0 也要显示（不是"-"）：玩家需要知道自己"差多少"，
+## 商人的价格标签才有参照物。
+func set_gold(amount: int) -> void:
+	if _gold_label == null:
+		return
+	_set_text(_gold_label, "金币 %d" % amount)
+	_gold_label.add_theme_color_override(
+		"font_color",
+		Color(1.0, 0.86, 0.34) if amount > 0 else Color(0.55, 0.58, 0.66),
+	)
+
+
+## 传送确认面板。复用 _panel 这套通用面板：它已经处理了遮罩、居中、清空，
+## 再造一套只会多一份需要同步的可见性状态。
+## 文案里必须写清"不回血"——玩家如果以为换图补血，会带着残血点确定，
+## 然后把这次死亡记到"传送"头上，而不是记到自己没买药上。
+func open_portal_confirm(reward_text: String, map_index: int, next_power_pct: int) -> void:
+	_clear_panel()
+	_dim.visible = true
+	_panel.visible = true
+
+	var title := _make_label("进入下一张地图？", 26, Color(0.95, 0.97, 1.0))
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_panel_box.add_child(title)
+
+	var body := _make_label("第 %d 图 → 第 %d 图　·　敌人属性 +%d%%\n这扇门给的是：%s"
+		% [map_index, map_index + 1, next_power_pct, reward_text],
+		15, Color(0.74, 0.84, 0.98))
+	body.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_panel_box.add_child(body)
+
+	var warn := _make_label("传送不回血，也不清空金币", 14, Color(0.94, 0.72, 0.42))
+	warn.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_panel_box.add_child(warn)
+
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 14)
+	row.add_child(_make_action_button("继续前进", Color(1.0, 0.85, 0.48), portal_confirmed.emit))
+	row.add_child(_make_action_button("再想想", Color(0.52, 0.68, 0.92), portal_cancelled.emit))
+	_panel_box.add_child(row)
+
+
+## 商店面板。stock 由 Game 组织，HUD 只负责画：
+## 买不买得起、买过没有，都靠 price / bought 两个字段表达，
+## 价格校验一行都不在这里做——HUD 不该知道玩家有多少钱。
+func open_shop(gold: int, stock: Array[Dictionary]) -> void:
+	_clear_panel()
+	_dim.visible = true
+	_panel.visible = true
+
+	var title := _make_label("流浪商人", 26, Color(1.0, 0.93, 0.70))
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_panel_box.add_child(title)
+
+	var wallet := _make_label("金币 %d" % gold, 16, Color(1.0, 0.86, 0.34))
+	wallet.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_panel_box.add_child(wallet)
+
+	for i in range(stock.size()):
+		_panel_box.add_child(_make_shop_row(stock[i], gold, i))
+
+	_panel_box.add_child(_make_action_button("离开", Color(0.52, 0.68, 0.92), shop_closed.emit))
+
+
+## 一行货：左边名称+说明，右边价格按钮。
+## 买不起时按钮直接 disabled 而不是"点了弹提示"：
+## 玩家扫一眼就知道这一排现在买不了，不需要逐个试。
+func _make_shop_row(item: Dictionary, gold: int, index: int) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+
+	var info := VBoxContainer.new()
+	info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	info.add_theme_constant_override("separation", 2)
+	info.add_child(_make_label(str(item["name"]), 17, Color(0.95, 0.97, 1.0)))
+	info.add_child(_make_label(str(item["desc"]), 13, Color(0.70, 0.80, 0.92)))
+	row.add_child(info)
+
+	var price: int = int(item["price"])
+	var bought: bool = bool(item["bought"])
+	var label: String = "已售罄" if bought else "%d 金" % price
+	var enabled: bool = (not bought) and gold >= price
+	row.add_child(_make_shop_button(label, enabled, shop_buy.emit.bind(index)))
+	return row
+
+
+## 商品按钮。比 _make_tool_button 宽（价格最多四个字），比 _make_action_button 矮，
+## 因为三行货要在同屏放下，高度是稀缺资源。
+func _make_shop_button(text: String, enabled: bool, callback: Callable) -> Button:
+	var button := Button.new()
+	button.text = text
+	button.custom_minimum_size = Vector2(112, 40)
+	button.focus_mode = Control.FOCUS_NONE
+	button.disabled = not enabled
+	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if enabled else Control.CURSOR_ARROW
+	button.add_theme_font_override("font", UiKit.font())
+	button.add_theme_font_size_override("font_size", 15)
+	for key in ["font_color", "font_hover_color", "font_pressed_color"]:
+		button.add_theme_color_override(key, Color(0.08, 0.10, 0.15))
+	button.add_theme_color_override("font_disabled_color", Color(0.58, 0.62, 0.70))
+	var accent: Color = Color(1.0, 0.85, 0.48)
+	button.add_theme_stylebox_override("normal", UiKit.flat(accent, accent.lightened(0.30), 9, 0))
+	button.add_theme_stylebox_override("hover", UiKit.flat(accent.lightened(0.12), accent.lightened(0.45), 9, 0))
+	button.add_theme_stylebox_override("pressed", UiKit.flat(accent.darkened(0.14), accent.lightened(0.28), 9, 0))
+	# 禁用态必须明显不同：深灰底 + 灰字，和可买的金色一眼能分开
+	button.add_theme_stylebox_override("disabled",
+		UiKit.flat(Color(0.19, 0.21, 0.27), Color(0.30, 0.33, 0.40), 9, 0))
+	if enabled:
+		button.pressed.connect(_ui_sound)
+		button.pressed.connect(callback)
+	return button
+
+
 ## 章节横幅。cleared 时换成金色，和"进新章"区分开：
 ## 通关是这一局唯一的一次性事件，不能和普通的换章长得一样。
 func show_banner(title: String, subtitle: String, tint: Color, cleared: bool) -> void:
@@ -492,6 +714,11 @@ func show_boss(boss_name: String, style: String = "") -> void:
 	if _boss_panel == null:
 		return
 	_set_text(_boss_name_label, boss_name if style.is_empty() else "%s · %s" % [boss_name, style])
+	# 上一只 Boss 的"破甲"状态不能带过来：留着的话新 Boss 一出场血条就是金色
+	_boss_vulnerable = false
+	_boss_state_text = ""
+	if _boss_state_label != null:
+		_boss_state_label.text = ""
 	set_boss_phase(0)
 	_boss_bar.value = 1.0
 	_boss_panel.visible = true
@@ -507,9 +734,41 @@ func set_boss_health(ratio: float) -> void:
 func set_boss_phase(phase: int) -> void:
 	if _boss_phase_label == null:
 		return
+	_boss_phase_value = phase
 	_set_text(_boss_phase_label, "第二阶段" if phase >= 1 else "第一阶段")
-	var fill: Color = Color(1.0, 0.62, 0.24) if phase >= 1 else Color(0.92, 0.27, 0.32)
+	_refresh_boss_fill()
+
+
+## 血条颜色的唯一出口：破甲窗口的金色优先级高于阶段色。
+## 只在这里改 fill，是因为 set_boss_state 每秒会被调用 10 次，
+## 每次 add_theme_stylebox_override 都会新建一个 StyleBox。
+func _refresh_boss_fill() -> void:
+	if _boss_bar == null:
+		return
+	var fill: Color
+	if _boss_vulnerable:
+		fill = Color(1.0, 0.78, 0.28)
+	elif _boss_phase_value >= 1:
+		fill = Color(1.0, 0.62, 0.24)
+	else:
+		fill = Color(0.92, 0.27, 0.32)
 	_boss_bar.add_theme_stylebox_override("fill", UiKit.flat(fill, Color.TRANSPARENT, 4, 0))
+
+
+## 每帧由 Game 喂进来的 Boss 状态。文本只在变化时才写，
+## 颜色只在"能不能打"翻转时才改——这两件事都以 10Hz 发生，不能每次都重建控件。
+func set_boss_state(text: String, vulnerable: bool) -> void:
+	if _boss_state_label == null:
+		return
+	if text != _boss_state_text:
+		_boss_state_text = text
+		_boss_state_label.text = text
+	if vulnerable == _boss_vulnerable:
+		return
+	_boss_vulnerable = vulnerable
+	_boss_state_label.add_theme_color_override("font_color",
+		Color(1.0, 0.86, 0.38) if vulnerable else Color(0.72, 0.80, 0.94))
+	_refresh_boss_fill()
 
 
 func hide_boss() -> void:
@@ -704,6 +963,32 @@ func _make_action_row() -> HBoxContainer:
 	return row
 
 
+## 按钮点击音。HUD 不认识音频系统之外的东西，只借一个引用播一声。
+func _ui_sound() -> void:
+	if audio != null:
+		audio.play("ui")
+
+
+## 右上角的常驻小按钮。尺寸 72×38：960 基准下换算到手机约 48×25 CSS 像素，
+## 是"点得准但不会占住半行"的上限；再小手指就压不准，再大就会盖住分数。
+func _make_tool_button(text: String, accent: Color, callback: Callable) -> Button:
+	var button := Button.new()
+	button.text = text
+	button.custom_minimum_size = Vector2(72, 38)
+	button.focus_mode = Control.FOCUS_NONE
+	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	button.add_theme_font_override("font", UiKit.font())
+	button.add_theme_font_size_override("font_size", 15)
+	for key in ["font_color", "font_hover_color", "font_pressed_color"]:
+		button.add_theme_color_override(key, Color(0.08, 0.10, 0.15))
+	button.add_theme_stylebox_override("normal", UiKit.flat(accent, accent.lightened(0.30), 9, 0))
+	button.add_theme_stylebox_override("hover", UiKit.flat(accent.lightened(0.12), accent.lightened(0.45), 9, 0))
+	button.add_theme_stylebox_override("pressed", UiKit.flat(accent.darkened(0.14), accent.lightened(0.28), 9, 0))
+	button.pressed.connect(_ui_sound)
+	button.pressed.connect(callback)
+	return button
+
+
 func _make_action_button(text: String, accent: Color, callback: Callable) -> Button:
 	var button := Button.new()
 	button.text = text
@@ -719,6 +1004,7 @@ func _make_action_button(text: String, accent: Color, callback: Callable) -> But
 	button.add_theme_stylebox_override("pressed", UiKit.flat(accent.darkened(0.12), accent.lightened(0.3), 10, 0))
 	# 键盘选中态：外圈加一道亮边，否则拿到焦点也看不出来
 	button.add_theme_stylebox_override("focus", UiKit.flat(accent.lightened(0.16), accent.lightened(0.75), 10, 3))
+	button.pressed.connect(_ui_sound)
 	button.pressed.connect(callback)
 	return button
 
@@ -726,7 +1012,32 @@ func _make_action_button(text: String, accent: Color, callback: Callable) -> But
 func clear_overlays() -> void:
 	_panel.visible = false
 	_dim.visible = false
+	if _pause_panel != null:
+		_pause_panel.visible = false
+	if _pause_btn != null:
+		_pause_btn.text = "暂停"
 	hide_banner()
+
+
+## 暂停面板的开合。由 Game 调：它才是唯一知道"现在能不能暂停"的人
+## （选卡中、结算中、菜单里都不该出现这块面板）。
+## 按钮文字跟着变，是为了让右上角那颗按钮同时承担"暂停"和"继续"两个动作——
+## 手机上多一颗按钮就多一片误触区，能复用就复用。
+func show_pause(shown: bool, subtitle: String = "") -> void:
+	if _pause_panel == null:
+		return
+	_pause_panel.visible = shown
+	if shown:
+		_dim.visible = true
+		_set_text(_pause_sub, subtitle)
+		if _pause_btn != null:
+			_pause_btn.text = "继续"
+	else:
+		if _pause_btn != null:
+			_pause_btn.text = "暂停"
+		# 结算面板可能还开着（战斗中按下暂停又立刻死亡之类），只有它也不在时才收遮罩
+		if not _panel.visible:
+			_dim.visible = false
 
 
 # ---------------------------------------------------------------- 面板零件
